@@ -257,12 +257,14 @@ struct ExifEntry: Identifiable, Codable, Equatable {
     var isAI: Bool { origin == .ai }
     /// 这一条是否真的跑过视觉模型
     var hasVision: Bool { visionLabels?.isEmpty == false }
-    /// 截图 / 素材 / 文档类，不该混进拍摄习惯统计
+    /// 系统明确判为「实用图」（文档 / 截图 / 收据）才在美学统计里剔除。
+    ///
+    /// 为什么不再用「低美学分」和「低置信度」兜底：拿相册真实数据标定过，
+    /// 200 张里有 11 张美学分是负数且主标签是 outdoor / structure ——
+    /// 那是暗光、纯色墙、糊片，属于**拍得不好的照片**，不是截图。
+    /// 把它们当非照片剔掉，等于把「拍砸了」从统计里藏起来，正好违背这个 app 的用途。
     var isNonPhoto: Bool {
-        guard hasVision else { return false }
-        if isUtilityShot == true { return true }
-        if let a = aesthetics, a < 0.05 { return true }
-        return (visionConfidence ?? 1) < 0.2
+        isUtilityShot == true
     }
 }
 
@@ -557,7 +559,7 @@ struct VisionFacts: Equatable {
     let labels: [String]
     /// 主标签置信度
     let confidence: Double
-    /// 美学分 0…1，系统模型给出的「这张好不好看」，无法用时为 nil
+    /// 美学分 0…1（已从系统原始的 -1…1 归一化），用不了时为 nil
     let aesthetics: Double?
     /// 人脸数量
     let faces: Int
@@ -565,14 +567,6 @@ struct VisionFacts: Equatable {
     let maxFaceArea: Double
     /// 系统判定的「实用图」（文档、表格、收据一类）
     let isUtility: Bool
-
-    /// 置信度低到这个程度基本可以断定不是自然照片：UI 截图、图标、纯色素材。
-    /// 实测截图/精灵表的主标签置信度落在 0.10–0.36，真实照片普遍 >0.5。
-    var looksNonPhoto: Bool {
-        if isUtility { return true }
-        if let a = aesthetics, a < 0.05 { return true }
-        return confidence < 0.2
-    }
 }
 
 enum VisionAnalyzer {
@@ -604,7 +598,10 @@ enum VisionAnalyzer {
 
         let aes: Double?
         if #available(macOS 15.0, *), let r = aesReq?.results?.first {
-            aes = Double(r.overallScore)
+            // ⚠️ overallScore 的原始范围是 **-1…1**，不是 0…1。
+            // 直接当 0…1 用会让负数被压进最低档、均值被整体拉低（实测相册里有 -0.83 的）。
+            // 这里统一归一化到 0…1，上层就只处理一种量纲。
+            aes = (Double(r.overallScore) + 1) / 2
         } else {
             aes = nil
         }
@@ -1003,12 +1000,12 @@ private enum StatUtility {
         let aesValues = photoish.compactMap { $0.aesthetics }.map { $0 }
         let meanAesthetics = aesValues.isEmpty ? 0 : aesValues.reduce(0, +) / Double(aesValues.count)
         let aestheticBuckets = dist(aesValues, [
-            ("<0.2", { $0 < 0.2 }),
-            ("0.2-0.4", { $0 >= 0.2 && $0 < 0.4 }),
-            ("0.4-0.55", { $0 >= 0.4 && $0 < 0.55 }),
-            ("0.55-0.7", { $0 >= 0.55 && $0 < 0.7 }),
-            ("0.7-0.85", { $0 >= 0.7 && $0 < 0.85 }),
-            ("≥0.85", { $0 >= 0.85 }),
+            ("<0.5", { $0 < 0.5 }),
+            ("0.5-0.6", { $0 >= 0.5 && $0 < 0.6 }),
+            ("0.6-0.7", { $0 >= 0.6 && $0 < 0.7 }),
+            ("0.7-0.8", { $0 >= 0.7 && $0 < 0.8 }),
+            ("0.8-0.9", { $0 >= 0.8 && $0 < 0.9 }),
+            ("≥0.9", { $0 >= 0.9 }),
         ])
         let visionCount = list.filter { $0.hasVision }.count
         let nonPhotoCount = list.filter { $0.isNonPhoto }.count
@@ -1373,7 +1370,7 @@ struct SingleShotView: View {
                         HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.caption2).foregroundStyle(Luma.warn)
-                            Text("这一张更像截图或素材图，已从拍摄统计的均值里排除。")
+                            Text("系统判定这一张属于文档 / 截图类，不计入画面美学均值。")
                                 .font(.caption).foregroundStyle(.secondary)
                             Spacer(minLength: 0)
                         }
@@ -1399,13 +1396,13 @@ struct SingleShotView: View {
     }
 
     private func aestheticRow(_ score: Double) -> some View {
-        let tint: Color = score >= 0.7 ? Luma.ok : (score >= 0.45 ? Luma.accent : Luma.warn)
+        let tint: Color = score >= 0.7 ? Luma.ok : (score >= 0.5 ? Luma.accent : Luma.warn)
         let grade: String = {
             switch score {
-            case 0.75...: return "很出彩"
-            case 0.6..<0.75: return "不错"
-            case 0.45..<0.6: return "一般"
-            case 0.3..<0.45: return "偏弱"
+            case 0.85...: return "很出彩"
+            case 0.7..<0.85: return "不错"
+            case 0.55..<0.7: return "一般"
+            case 0.4..<0.55: return "偏弱"
             default: return "待提升"
             }
         }()
@@ -1779,7 +1776,7 @@ struct StatsView: View {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(String(format: "%.2f", s.meanAesthetics))
                             .font(.title2).bold().monospacedDigit()
-                            .foregroundStyle(s.meanAesthetics >= 0.6 ? Luma.ok : Luma.accent)
+                            .foregroundStyle(s.meanAesthetics >= 0.7 ? Luma.ok : Luma.accent)
                         Text("平均美学分").font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Text("\(s.visionCount) 张已识别")
@@ -1791,7 +1788,7 @@ struct StatsView: View {
                         }
                     }
                     if s.nonPhotoCount > 0 {
-                        Text("另有 \(s.nonPhotoCount) 张被判为截图或素材图，已排除在均值之外")
+                        Text("另有 \(s.nonPhotoCount) 张被系统识别为文档或截图，未计入美学均值")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
