@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>ShotLog</string>
+	<key>CFBundleExecutable</key>
+	<string>ShotLog</string>
+	<key>CFBundleIconFile</key>
+	<string>ShotLog</string>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>ShotLog</string>
+	</array>
+	<key>CFBundleIdentifier</key>
+	<string>com.tianzheyu.ShotLog</string>
+	<key>CFBundleName</key>
+	<string>ShotLog</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>ShotLog — 照片拍摄行为分析工具（本地优先，数据不上传云端）</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>ShotLog 需要读取相册以解析照片的拍摄参数（EXIF、机型、镜头、曝光等），所有分析仅在本机完成，任何数据都不会上传云端。</string>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+</dict>
+</plist>
