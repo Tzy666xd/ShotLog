@@ -280,6 +280,7 @@ struct ExifEntry: Identifiable, Codable, Equatable {
         case focalLengthMm, focal35mm, aperture, shutterSpeed, iso, exposureComp, whiteBalance
         case flashOn, origin
         case visionLabels, visionConfidence, aesthetics, faceCount, maxFaceArea, isUtilityShot
+        case faceOffset, meanLuma, contrast, shadowClip, highlightClip, saturation, sharpness
     }
     let assetIdentifier: String
     let localURL: URL?
@@ -311,6 +312,22 @@ struct ExifEntry: Identifiable, Codable, Equatable {
     let maxFaceArea: Double?
     /// 系统判定为「实用图」（文档/表格/收据一类，不是自然照片）
     let isUtilityShot: Bool?
+    /// 最大人脸偏离画面中心的归一化距离（0 正中 … 1 贴边），给「主体死居中」的判断用
+    let faceOffset: Double?
+
+    // MARK: 画面统计（128×128 采样，点评的依据）
+    /// 平均亮度 0…1
+    let meanLuma: Double?
+    /// 明暗跨度（p95 − p05）
+    let contrast: Double?
+    /// 死黑像素占比
+    let shadowClip: Double?
+    /// 高光溢出占比
+    let highlightClip: Double?
+    /// 平均饱和度
+    let saturation: Double?
+    /// 拉普拉斯方差，越大越锐
+    let sharpness: Double?
 
     var isAI: Bool { origin == .ai }
     /// 这一条是否真的跑过视觉模型
@@ -469,7 +486,14 @@ private enum Helper {
             aesthetics: vision?.aesthetics,
             faceCount: vision?.faces,
             maxFaceArea: vision?.maxFaceArea,
-            isUtilityShot: vision?.isUtility)
+            isUtilityShot: vision?.isUtility,
+            faceOffset: vision?.faceOffset,
+            meanLuma: vision?.stats?.meanLuma,
+            contrast: vision?.stats?.contrast,
+            shadowClip: vision?.stats?.shadowClip,
+            highlightClip: vision?.stats?.highlightClip,
+            saturation: vision?.stats?.saturation,
+            sharpness: vision?.stats?.sharpness)
     }
 
     /// 先选照片再读信息：用户在导入视图里勾选了 asset 标识符后，由这里并发解析 EXIF。
@@ -784,6 +808,72 @@ struct VisionFacts: Equatable {
     let maxFaceArea: Double
     /// 系统判定的「实用图」（文档、表格、收据一类）
     let isUtility: Bool
+    /// 最大人脸中心离画面中心的归一化距离：0 = 正中，1 = 贴边。用来判断「主体是否死居中」。
+    let faceOffset: Double
+    /// 画面统计（128×128 采样），点评要用：亮度、反差、阴影/高光裁切、饱和度、锐度
+    let stats: ImageStats?
+}
+
+/// 从缩略图上直接量出来的画面统计。128×128 只为了拿分布，够用且几乎不耗时（<1ms）。
+struct ImageStats: Equatable {
+    /// 平均亮度 0…1
+    let meanLuma: Double
+    /// 5% / 95% 分位之差，代表明暗跨度
+    let contrast: Double
+    /// 压到死黑的像素占比（亮度 < 4%）
+    let shadowClip: Double
+    /// 顶到纯白的像素占比（亮度 > 97%）
+    let highlightClip: Double
+    /// 平均饱和度 0…1
+    let saturation: Double
+    /// 拉普拉斯方差，越大越锐
+    let sharpness: Double
+
+    static func from(_ cg: CGImage) -> ImageStats? {
+        let side = 128
+        var buf = [UInt8](repeating: 0, count: side * side * 4)
+        guard let ctx = CGContext(data: &buf, width: side, height: side, bitsPerComponent: 8,
+                                  bytesPerRow: side * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: side, height: side))
+
+        var luma = [Double](repeating: 0, count: side * side)
+        var sat = 0.0
+        var shadow = 0, highlight = 0
+        for i in 0 ..< (side * side) {
+            let r = Double(buf[i * 4]) / 255, g = Double(buf[i * 4 + 1]) / 255, b = Double(buf[i * 4 + 2]) / 255
+            let l = 0.2126 * r + 0.7152 * g + 0.0722 * b
+            luma[i] = l
+            let mx = max(r, g, b), mn = min(r, g, b)
+            sat += mx > 0.001 ? (mx - mn) / mx : 0
+            if l < 0.04 { shadow += 1 }
+            if l > 0.97 { highlight += 1 }
+        }
+        let sorted = luma.sorted()
+        let p05 = sorted[Int(Double(sorted.count) * 0.05)]
+        let p95 = sorted[Int(Double(sorted.count) * 0.95)]
+
+        // 4 邻域拉普拉斯方差：纯色 / 失焦会明显偏低，纹理丰富会高
+        var sum = 0.0, sq = 0.0, n = 0.0
+        for y in 1 ..< (side - 1) {
+            for x in 1 ..< (side - 1) {
+                let c = luma[y * side + x]
+                let v = 4 * c - luma[(y - 1) * side + x] - luma[(y + 1) * side + x]
+                    - luma[y * side + x - 1] - luma[y * side + x + 1]
+                sum += v; sq += v * v; n += 1
+            }
+        }
+        let lapMean = sum / n
+        let variance = max(0, sq / n - lapMean * lapMean)
+
+        return ImageStats(meanLuma: luma.reduce(0, +) / Double(luma.count),
+                          contrast: p95 - p05,
+                          shadowClip: Double(shadow) / Double(side * side),
+                          highlightClip: Double(highlight) / Double(side * side),
+                          saturation: sat / Double(side * side),
+                          sharpness: variance)
+    }
 }
 
 enum VisionAnalyzer {
@@ -829,6 +919,15 @@ enum VisionAnalyzer {
         let maxFaceArea = faceObs
             .map { Double($0.boundingBox.width * $0.boundingBox.height) }
             .max() ?? 0
+        // 最大那张脸偏离画面中心多远：0 = 正中，1 = 贴边。用来给「主体是否死居中」提供依据。
+        let faceOffset: Double = {
+            guard let big = faceObs.max(by: {
+                $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height
+            }) else { return 0 }
+            let dx = Double(big.boundingBox.midX - 0.5)
+            let dy = Double(big.boundingBox.midY - 0.5)
+            return min(1, (dx * dx + dy * dy).squareRoot() * 2)
+        }()
 
         return VisionFacts(
             labels: results.prefix(6).map { $0.identifier },
@@ -839,7 +938,9 @@ enum VisionAnalyzer {
             isUtility: {
                 if #available(macOS 15.0, *), let r = aesReq?.results?.first { return r.isUtility }
                 return false
-            }()
+            }(),
+            faceOffset: faceOffset,
+            stats: ImageStats.from(cg)
         )
     }
 
@@ -936,6 +1037,125 @@ enum VisionAnalyzer {
         case "darkness": return "暗部"
         default: return label.replacingOccurrences(of: "_", with: " ")
         }
+    }
+}
+
+// MARK: - 单张照片点评
+/// 一张照片的点评结果：一句总评 + 优点 + 可改进。
+struct Critique: Equatable {
+    struct Point: Identifiable, Equatable {
+        let id = UUID()
+        let title: String
+        let text: String
+        /// 排序权重：越大越值得先说
+        let weight: Double
+        init(_ title: String, _ text: String, _ weight: Double) {
+            self.title = title; self.text = text; self.weight = weight
+        }
+    }
+    let summary: String
+    let strengths: [Point]
+    let improvements: [Point]
+}
+
+/// 本地点评引擎。
+///
+/// 不是生成式模型：这台机器上 `FoundationModels` 不可用（deviceNotEligible），
+/// 为一段评语去联网也违背这个 app「全程本地」的前提。
+/// 所以这里做的是**把已经测到的事实翻译成人话**——EXIF 的技术参数、Vision 的分类 / 人脸 / 美学，
+/// 加上从 128×128 采样量出来的亮度、反差、裁切、饱和度、锐度。
+/// 每条点评都能指回一个具体数值，不会凭空编造画面里没有的东西。
+enum CritiqueEngine {
+    static func evaluate(_ e: ExifEntry) -> Critique {
+        if e.isNonPhoto {
+            return Critique(summary: "这张被系统判成文档 / 截图，没有拍摄意图，不做画面点评。",
+                            strengths: [], improvements: [])
+        }
+        var good: [Critique.Point] = []
+        var bad: [Critique.Point] = []
+
+        // —— 画面统计 ——
+        if let a = e.aesthetics {
+            if a >= 0.78 { good.append(.init("整体观感", String(format: "系统美学分 %.2f，构图与色彩组织得住", a), 8)) }
+            if a < 0.45 { bad.append(.init("画面吸引力", String(format: "美学分 %.2f 偏低，主体和层次可以更分明", a), 4)) }
+        }
+        if let c = e.contrast {
+            if c >= 0.62 { good.append(.init("明暗层次", String(format: "明暗跨度 %.0f/255，反差有力", c * 255), 6)) }
+            if c <= 0.35 { bad.append(.init("画面发灰", String(format: "明暗跨度只有 %.0f/255，像蒙了一层雾", c * 255), 5)) }
+        }
+        if let h = e.highlightClip, h >= 0.01 {
+            bad.append(.init("高光溢出", String(format: "约 %.0f%% 的像素接近纯白，天空或灯箱会丢细节", h * 100), 9))
+        }
+        if let sh = e.shadowClip, sh >= 0.08 {
+            bad.append(.init("暗部死黑", String(format: "约 %.0f%% 的像素压到最暗，阴影层次拉不回来", sh * 100), 8))
+        }
+        if let k = e.sharpness {
+            if k >= 0.030 { good.append(.init("细节扎实", "边缘清晰，主体纹理留得住", 6)) }
+            if k <= 0.008 { bad.append(.init("锐度偏低", "细节边缘发软，可能失焦或手持抖动", 7.5)) }
+        }
+        if let s = e.saturation {
+            if s >= 0.40 { good.append(.init("色彩饱满", "饱和度充足，画面有情绪", 5)) }
+            if s <= 0.12 { bad.append(.init("色彩偏淡", "整体饱和度很低，除非刻意做灰调，否则会显得沉闷", 3.5)) }
+        }
+
+        // —— EXIF ——
+        if let iso = e.iso {
+            if iso > 1600 { bad.append(.init("高感噪点", "ISO \(iso)，暗部容易出彩色噪点", 5)) }
+            if iso <= 100, (e.meanLuma ?? 0) > 0.25 {
+                good.append(.init("画质干净", "ISO \(iso) 且光线充足，噪点几乎不可见", 6))
+            }
+        }
+        if let sec = Helper.secondsOf(e.shutterSpeed) {
+            if sec > Helper.slowShutterSeconds {
+                bad.append(.init("快门偏慢", "\(e.shutterSpeed ?? "")，手持容易糊——除非是刻意拖影", 7))
+            } else if sec <= 1.0 / 250 {
+                good.append(.init("快门充裕", "\(e.shutterSpeed ?? "") 足够快，手持不必担心抖", 4))
+            }
+        }
+        if let ev = e.exposureComp {
+            if abs(ev) <= 0.4 { good.append(.init("曝光基准稳", "曝光补偿接近 0，测光把握住了", 5)) }
+            if ev > 1.3 { bad.append(.init("整体过曝", String(format: "补偿 +%.1f EV，高光会顶到天花板", ev), 8.5)) }
+            if ev < -1.3 { bad.append(.init("整体欠曝", String(format: "补偿 %.1f EV，暗部会缺细节", ev), 8.5)) }
+        }
+
+        // —— 构图 / 焦段 ——
+        if let ap = e.aperture, ap <= 2.0, (e.maxFaceArea ?? 0) > 0.03 {
+            good.append(.init("浅景深", String(format: "f/%.1f 配大主体，背景虚化把人托了出来", ap), 6))
+        }
+        if (e.maxFaceArea ?? 0) > 0.03 {
+            let off = e.faceOffset ?? 0
+            if off > 0.55 {
+                bad.append(.init("主体居中", "人脸几乎压在正中，往三分线挪一点会更松弛", 4))
+            } else {
+                good.append(.init("主体位置", "人脸没有死居中，构图留了呼吸", 4))
+            }
+        }
+        if let eq = Helper.equivalentFocal(e) {
+            if eq >= 85 { good.append(.init("长焦压缩", String(format: "等效 %.0fmm，背景被压得更近、更干净", eq), 5)) }
+            if eq < 16 { bad.append(.init("超广角边缘", "等效 \(Int(eq))mm 视角很宽，边缘容易带进杂物或变形", 3)) }
+            if (24 ... 35).contains(eq) { good.append(.init("标准视角", String(format: "等效 %.0fmm 接近人眼，透视自然", eq), 3)) }
+        }
+
+        // 指标都健康时也要给一句「还能怎么试」，否则点评会显得没说完
+        if bad.isEmpty {
+            bad.append(.init("还可以再试", "技术指标已经干净，想再进一步就换机位：更低、更近，或者让主体离背景更远", 1))
+        }
+
+        let strengths = Array(good.sorted { $0.weight > $1.weight }.prefix(3))
+        let improvements = Array(bad.sorted { $0.weight > $1.weight }.prefix(3))
+
+        let g = strengths.prefix(2).map(\.title)
+        let b = improvements.prefix(2).map(\.title)
+        let summary: String
+        if b.isEmpty {
+            summary = g.isEmpty ? "各项数据都在正常范围，没有明显硬伤。"
+                                : "长处是\(g.joined(separator: "、"))，没有明显硬伤。"
+        } else if g.isEmpty {
+            summary = "主要问题是\(b.joined(separator: "、"))。"
+        } else {
+            summary = "长处是\(g.joined(separator: "、"))；\(b[0])是最值得改的一处。"
+        }
+        return Critique(summary: summary, strengths: strengths, improvements: improvements)
     }
 }
 
@@ -1617,6 +1837,7 @@ struct SingleShotView: View {
                 hero
                 sourceBanner
                 Card(title: "拍摄参数") { paramRows }
+                critiqueSection
                 listVisionSection
                 listEnvSection
                 listAdviceSection
@@ -1697,6 +1918,52 @@ struct SingleShotView: View {
         if let s = support { tags.append(Tag.support(s)) }
         if entry.isAI { tags.append(Tag.ai("环境已推测")) }
         return Card(title: "拍摄环境推断") { TagsList(tags: tags) }
+    }
+
+    /// 单张点评：把 EXIF + Vision 观测 + 画面统计翻译成「优点 / 可改进」。
+    @ViewBuilder
+    private var critiqueSection: some View {
+        let c = CritiqueEngine.evaluate(entry)
+        Card(title: "画面点评", trailing: "本地推断") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(c.summary)
+                    .font(.subheadline)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !c.strengths.isEmpty {
+                    critiqueGroup("优点", c.strengths, tint: Luma.ok, icon: "checkmark.seal.fill")
+                }
+                if !c.improvements.isEmpty {
+                    critiqueGroup("可改进", c.improvements, tint: Luma.warn, icon: "wand.and.stars")
+                }
+                Text("依据 EXIF 参数、Vision 观测与画面统计推断，不是生成式模型写的评语。")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+    }
+    private func critiqueGroup(_ title: String, _ points: [Critique.Point],
+                               tint: Color, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Circle().fill(tint).frame(width: 5, height: 5)
+                Text(title).font(.caption).fontWeight(.semibold).foregroundStyle(tint)
+            }
+            ForEach(points) { p in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: icon)
+                        .font(.caption2)
+                        .foregroundStyle(tint)
+                        .frame(width: 14)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(p.title).font(.subheadline).fontWeight(.medium)
+                        Text(p.text).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(9)
+                .background(insetFill(cs), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+        }
     }
 
     /// 系统内置视觉模型读出来的画面内容。模型权重在 macOS 里，app 不打包任何文件。
