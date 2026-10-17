@@ -222,7 +222,7 @@ struct ExifEntry: Identifiable, Codable, Equatable {
     // id 是运行时标识，不参与编解码
     enum CodingKeys: String, CodingKey {
         case assetIdentifier, localURL, capturedAt, location, phoneModel, lens
-        case focalLengthMm, aperture, shutterSpeed, iso, exposureComp, whiteBalance
+        case focalLengthMm, focal35mm, aperture, shutterSpeed, iso, exposureComp, whiteBalance
         case flashOn, origin
         case visionLabels, visionConfidence, aesthetics, faceCount, maxFaceArea, isUtilityShot
     }
@@ -233,6 +233,9 @@ struct ExifEntry: Identifiable, Codable, Equatable {
     let phoneModel: String?
     let lens: String?
     let focalLengthMm: Double?
+    /// 35mm 等效焦距。绝大多数手机**不写这个字段**（实测本机相册 400 张里 0 张有），
+    /// 有的话就是最可靠的焦段依据；没有则要靠 lensLabel 的机型启发式。
+    let focal35mm: Int?
     let aperture: Double?
     let shutterSpeed: String?
     let iso: Int?
@@ -359,6 +362,8 @@ private enum Helper {
         let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
         let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
         let focal = Helper.number(exif, "FocalLength")
+        // 35mm 等效焦距：手机基本不写，相机多半也不写，读到就是意外之喜
+        let focal35 = (exif["FocalLengthIn35mmFilm"] as? NSNumber)?.intValue
         let aperture = Helper.number(exif, "FNumber")
         let iso = (exif["ISOSpeedRatings"] as? [NSNumber])?.first?.intValue
         let shutterCaptured = Helper.number(exif, "ExposureTime")
@@ -380,7 +385,7 @@ private enum Helper {
         let wb = (exif["WhiteBalance"] as? NSNumber).map { $0.intValue == 0 ? "自动" : "手动" }
         return ExifEntry(assetIdentifier: assetIdentifier, localURL: localURL,
             capturedAt: capturedAt, location: location,
-            phoneModel: camera, lens: lens, focalLengthMm: focal,
+            phoneModel: camera, lens: lens, focalLengthMm: focal, focal35mm: focal35,
             aperture: aperture, shutterSpeed: shutter, iso: iso,
             exposureComp: ev, whiteBalance: wb, flashOn: flashNum,
             origin: .exif,
@@ -547,7 +552,8 @@ private enum Helper {
         let hour = Calendar.current.component(.hour, from: e.capturedAt)
         if hour >= 20 || hour < 6 { return .night }
         if e.flashOn == true { return .indoor }
-        if let f = e.focalLengthMm {
+        // 焦段兜底只对相机成立：手机实际焦距都在 15mm 以内，套 50mm 阈值永远不命中
+        if let f = e.focalLengthMm, !Helper.isSmallSensor(e) {
             if f >= 50 { return .portrait }
             if f <= 20 { return .landscape }
         }
@@ -575,8 +581,34 @@ private enum Helper {
         return out
     }
 
+    /// 是不是手机 / 平板这类小底设备。
+    /// 手机的实际焦距普遍只有 1.5–15mm，直接套全画幅的 24 / 50 阈值，
+    /// 会把**每一张**手机照片都算成「超广角」——这正是之前「超广角 329 张」的来源。
+    static func isSmallSensor(_ e: ExifEntry) -> Bool {
+        let m = (e.phoneModel ?? "").lowercased()
+        let markers = ["iphone", "ipad", "nova", "huawei", "honor", "oppo", "vivo",
+                       "xiaomi", "redmi", "pixel", "samsung", "sm-", "oneplus",
+                       "realme", "meizu", "op-", "nothing"]
+        return markers.contains { m.contains($0) }
+    }
+
+    /// 焦段归类。优先级：35mm 等效焦距 → 手机按实际焦距分档 → 相机按全画幅阈值。
+    /// 实测本机：iPhone 超广角 1.5–2.7mm、主摄 4.2–6.8mm、长焦 9mm；
+    /// 安卓 5.8mm（主摄）/ 14.6mm（长焦）；尼康 24–200mm 全画幅。
     static func lensLabel(_ e: ExifEntry) -> String {
+        let lens = (e.lens ?? "").lowercased()
+        if lens.contains("front") || lens.contains("truedepth") { return "前置" }
+        if let eq = e.focal35mm, eq > 0 {
+            if eq < 24 { return "超广角" }
+            if eq >= 50 { return "长焦" }
+            return "主摄"
+        }
         guard let f = e.focalLengthMm else { return "其他" }
+        if isSmallSensor(e) {
+            if f < 3.4 { return "超广角" }
+            if f >= 8 { return "长焦" }
+            return "主摄"
+        }
         if f < 24 { return "超广角" }
         if f >= 50 { return "长焦" }
         return "主摄"
@@ -861,6 +893,8 @@ struct GlobalStats: Equatable {
     let visionCount: Int
     /// 被判定为「非照片」（截图/文档/素材）的条目数
     let nonPhotoCount: Int
+    /// 因判为文档/截图而被排除出所有分布统计的条目数（= 总数 − 参与统计数）
+    let skippedCount: Int
     /// 平均美学分 0…1，没有视觉数据时为 0
     let meanAesthetics: Double
     /// 美学分分布
@@ -881,8 +915,14 @@ private enum StatUtility {
             return es.filter { $0.capturedAt >= from }
         }()
 
-        let total = list.count
-        let real = list.filter { !$0.isAI }
+        // 文档 / 截图没有拍摄意图，不参与「拍什么、用什么拍」的分布统计——
+        // 混进来会把风景、室内弱光的占比整个拉偏（实测 500 张里有 104 张是文档截图）。
+        // 它们仍会进到下面的 visionCount / nonPhotoCount，让用户知道跳过了多少。
+        let usable: [ExifEntry] = list.filter { $0.isUtilityShot != true }
+        let skippedCount = list.count - usable.count
+
+        let total = usable.count
+        let real = usable.filter { !$0.isAI }
         let aiCount = total - real.count
         // 失误率的分母用 EXIF 条目数，避免 AI 估算条目把比率稀释
         let realCount = max(real.count, 1)
@@ -907,7 +947,7 @@ private enum StatUtility {
         let starts = [0, 4, 8, 12, 16, 20]
         var tCounts = Array(repeating: 0, count: 6)
         var golden = 0
-        for e in list {
+        for e in usable {
             let h = cal.component(.hour, from: e.capturedAt)
             tCounts[max(0, min(h / 4, 5))] += 1
             // 日出后 / 日落前，用整点近似
@@ -922,7 +962,7 @@ private enum StatUtility {
         var weekday = Array(repeating: 0, count: 7)
         var heat = Array(repeating: Array(repeating: 0, count: 8), count: 7)
         var dayCounter: [String: (Date, Int)] = [:]
-        for e in list {
+        for e in usable {
             // Calendar 的 weekday 以周日为 1，(w + 5) % 7 转成周一为 0
             let mondayFirst = (cal.component(.weekday, from: e.capturedAt) + 5) % 7
             weekday[mondayFirst] += 1
@@ -941,7 +981,7 @@ private enum StatUtility {
 
         // —— 月度趋势（最多 12 个月）——
         var monthMap: [String: (Date, Int)] = [:]
-        for e in list {
+        for e in usable {
             let c = cal.dateComponents([.year, .month], from: e.capturedAt)
             guard let y = c.year, let m = c.month,
                   let first = cal.date(from: DateComponents(year: y, month: m, day: 1)) else { continue }
@@ -958,7 +998,6 @@ private enum StatUtility {
 
         // —— 连续参数分布 ——
         let apValues = real.compactMap { e in e.aperture }
-        let focalValues = real.compactMap { e in e.focalLengthMm }
         let evValues = real.compactMap { e in e.exposureComp }
         let isoBuckets = dist(isoValues, [
             ("≤100", { $0 <= 100 }),
@@ -984,15 +1023,15 @@ private enum StatUtility {
             ("1/15-1s", { $0 > 1.0 / 15 && $0 <= 1.0 }),
             (">1s", { $0 > 1.0 })
         ])
-        let focalBuckets = dist(focalValues, [
-            ("<16", { $0 < 16 }),
-            ("16-24", { $0 >= 16 && $0 < 24 }),
-            ("24-35", { $0 >= 24 && $0 < 35 }),
-            ("35-50", { $0 >= 35 && $0 < 50 }),
-            ("50-85", { $0 >= 50 && $0 < 85 }),
-            ("85-135", { $0 >= 85 && $0 < 135 }),
-            (">135", { $0 >= 135 })
-        ])
+        // 焦距不再按「实际毫米数」分档：手机实际焦距只有 1.5–15mm，
+        // 全部挤进 <16 一档，看不出任何信息。改成按镜头角色归类，
+        // 和「设备与焦段」那张卡片用同一套口径。
+        let lensCounts: [String: Int] = usable.reduce(into: [:]) { acc, e in
+            acc[Helper.lensLabel(e), default: 0] += 1
+        }
+        let focalBuckets = ["超广角", "主摄", "长焦", "前置", "其他"].map {
+            DistBucket(label: $0, count: lensCounts[$0] ?? 0)
+        }
         let evBuckets = dist(evValues, [
             ("≤-2", { $0 <= -2 }),
             ("-2~-1", { $0 > -2 && $0 <= -1 }),
@@ -1007,16 +1046,14 @@ private enum StatUtility {
         var scene: [SceneType: Int] = [:]
         var light: [LightEnvironment: Int] = [:]
         var support: [ShotSupport: Int] = [:]
-        for e in list {
+        for e in usable {
             scene[Helper.analyzeScene(e), default: 0] += 1
             light[Helper.analyzeLight(e), default: 0] += 1
             if let s = Helper.analyzeSupport(e) { support[s, default: 0] += 1 }
         }
-        var lensC: [String: Int] = [:]
-        for e in list { lensC[Helper.lensLabel(e), default: 0] += 1 }
-        let orderedLens = lensC.sorted { $0.value > $1.value }.map { LensUsage(label: $0.key, count: $0.value) }
+        let orderedLens = lensCounts.sorted { $0.value > $1.value }.map { LensUsage(label: $0.key, count: $0.value) }
         var camC: [String: Int] = [:]
-        for e in list {
+        for e in usable {
             if let m = e.phoneModel?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
                 camC[m, default: 0] += 1
             }
@@ -1027,9 +1064,9 @@ private enum StatUtility {
         let topFocalLabel = orderedLens.first?.label
 
         // —— 视觉模型给出的画面质量 ——
-        // 只看真正跑过 Vision 的条目；截图/素材单独计数，不混进美学均值。
-        let photoish = list.filter { $0.hasVision && !$0.isNonPhoto }
-        let aesValues = photoish.compactMap { $0.aesthetics }.map { $0 }
+        // usable 已经在上面剔掉了文档/截图，这里只要再确认跑过 Vision。
+        let photoish = usable.filter { $0.hasVision }
+        let aesValues = photoish.compactMap { $0.aesthetics }
         let meanAesthetics = aesValues.isEmpty ? 0 : aesValues.reduce(0, +) / Double(aesValues.count)
         let aestheticBuckets = dist(aesValues, [
             ("<0.5", { $0 < 0.5 }),
@@ -1066,7 +1103,7 @@ private enum StatUtility {
             busiestDay: busiestDay, busiestCount: busiestCount,
             topSceneLabel: topSceneLabel, topFocalLabel: topFocalLabel,
             health: health,
-            visionCount: visionCount, nonPhotoCount: nonPhotoCount,
+            visionCount: visionCount, nonPhotoCount: nonPhotoCount, skippedCount: skippedCount,
             meanAesthetics: meanAesthetics, aestheticBuckets: aestheticBuckets
         )
     }
@@ -1812,7 +1849,7 @@ struct StatsView: View {
                             .foregroundStyle(s.meanAesthetics >= 0.7 ? Luma.ok : Luma.accent)
                         Text("平均美学分").font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Text("\(s.visionCount) 张已识别")
+                        Text("\(photoTotal) 张计入")
                             .font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
                     }
                     VStack(alignment: .leading, spacing: 7) {
@@ -1834,7 +1871,9 @@ struct StatsView: View {
     private func header(_ s: GlobalStats) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("拍摄统计画像").font(.title2).bold()
-            Text("共 \(s.total) 张 · EXIF \(s.exifCount) · AI 推算 \(s.aiCount)")
+            Text("共 \(s.total) 张参与统计 · EXIF \(s.exifCount)"
+                 + (s.aiCount > 0 ? " · AI 推算 \(s.aiCount)" : "")
+                 + (s.skippedCount > 0 ? " · 另有 \(s.skippedCount) 张文档/截图未计入" : ""))
                 .font(.subheadline).foregroundStyle(.secondary)
         }
     }
@@ -2017,9 +2056,28 @@ struct StatsView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .animation(.easeOut(duration: 0.35), value: distTab)
-                Text(kDistNotes[idx]).font(.caption).foregroundStyle(.secondary)
+                Text(distNote(idx, s)).font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// ISO 那一档的说明改成按实际分布说话。
+    /// 原来固定写「整体偏高说明常在弱光下拍摄」，可实测 57% 的照片 ISO 都在 400 以内，
+    /// 文案和数字正好相反。
+    private func distNote(_ idx: Int, _ s: GlobalStats) -> String {
+        guard idx == 0 else { return kDistNotes[idx] }
+        let total = max(s.isoBuckets.reduce(0) { $0 + $1.count }, 1)
+        let low = s.isoBuckets.prefix(2).reduce(0) { $0 + $1.count }    // ≤400
+        let high = s.isoBuckets.suffix(2).reduce(0) { $0 + $1.count }   // >1600
+        let lowPct = low * 100 / total
+        let highPct = high * 100 / total
+        if highPct >= 25 {
+            return "\(highPct)% 的照片 ISO 高于 1600，弱光场景偏多，留意噪点。"
+        }
+        if lowPct >= 50 {
+            return "\(lowPct)% 的照片 ISO 在 400 以内，多数拍于光线充足时，画质底子干净。"
+        }
+        return "ISO 分布较均衡：\(lowPct)% 在 400 以内，\(highPct)% 超过 1600。"
     }
 
     // MARK: 拍摄时段
@@ -2055,7 +2113,7 @@ struct StatsView: View {
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
                         ForEach(Array(s.cameraModels.prefix(4))) { m in
-                            shareRow(label: m.name, count: m.count, maxCount: camMax, tint: Color.primary)
+                            shareRow(label: m.name, count: m.count, maxCount: camMax, tint: Luma.muted)
                         }
                     }
                 }
