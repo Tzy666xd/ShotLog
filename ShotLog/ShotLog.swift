@@ -435,6 +435,38 @@ private enum Helper {
         }
         return ns
     }
+
+    /// 详情页顶部大图，单独走高质量通道。
+    ///
+    /// 不能复用 `thumbnailForAsset`：那个是给列表 56–220pt 的小图用的，
+    /// `deliveryMode = .fastFormat` 明确要「快而不讲究」，700pt 方形被拉到 900pt 宽就是一片糊。
+    /// `.opportunistic` 也不行——它的第一次回调是 degraded 占位图，
+    /// 用一次性 continuation 接，接到的永远是那张低清版（注释里写着「取最后一次」，实际取到的是第一次）。
+    /// 这里直接 `.highQualityFormat`：只回调最终图，按 Hero 的实际比例要像素。
+    @MainActor
+    static func heroImageForAsset(id: String, width: Int = 3000, height: Int = 800) async -> NSImage? {
+        let key = "hero-\(id)-\(width)" as NSString
+        if let hit = thumbCache.store.object(forKey: key) { return hit }
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        guard let asset = fetched.firstObject else { return nil }
+        let ns: NSImage? = await withCheckedContinuation { cont in
+            let opts = PHImageRequestOptions()
+            // iCloud「优化存储」时本地只有占位图，不开网络就只能拿到那张蒙了的
+            opts.isNetworkAccessAllowed = true
+            opts.deliveryMode = .highQualityFormat
+            opts.resizeMode = .exact
+            opts.version = .current
+            PHImageManager.default().requestImage(for: asset,
+                targetSize: .init(width: width, height: height),
+                contentMode: .aspectFill, options: opts) { image, _ in
+                cont.resume(returning: image)
+            }
+        }
+        if let ns {
+            thumbCache.store.setObject(ns, forKey: key, cost: width * height * 4)
+        }
+        return ns
+    }
     static func number(_ d: [String: Any], _ key: String) -> Double? { (d[key] as? NSNumber)?.doubleValue }
 
     // --- formatters ---
@@ -1269,7 +1301,7 @@ struct HeroPhoto: View {
                 Image(systemName: "photo").font(.title).foregroundStyle(Luma.muted)
             }
         }
-        .task { image = await Helper.thumbnailForAsset(id: assetIdentifier, size: 700) }
+        .task { image = await Helper.heroImageForAsset(id: assetIdentifier) }
     }
 }
 
