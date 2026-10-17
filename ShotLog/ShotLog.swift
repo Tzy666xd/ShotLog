@@ -2060,6 +2060,64 @@ struct SingleShotView: View {
     }
 }
 
+/// 液态玻璃分段滑块：玻璃凹槽 + 一块会滑过去的玻璃滑块。
+///
+/// 系统 `.pickerStyle(.segmented)` 选中项是纯色蓝块，和这套玻璃语言不搭；
+/// 这里用 `matchedGeometryEffect` 做滑块，换段时用弹簧过渡。
+struct GlassSegmentedControl: View {
+    @Binding var selection: Int
+    let titles: [String]
+    @Namespace private var thumb
+    @Environment(\.colorScheme) private var cs
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(titles.enumerated()), id: \.offset) { index, title in
+                Button {
+                    guard selection != index else { return }
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.86)) {
+                        selection = index
+                    }
+                } label: {
+                    Text(title)
+                        .font(.system(size: 12.5, weight: selection == index ? .semibold : .regular))
+                        .foregroundStyle(selection == index ? Color.primary : Color.secondary)
+                        .frame(width: 62, height: 26)
+                        .contentShape(Capsule())
+                        .background {
+                            if selection == index {
+                                thumbShape.matchedGeometryEffect(id: "thumb", in: thumb)
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background {
+            Capsule(style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(Capsule().fill(Color.white.opacity(cs == .dark ? 0.04 : 0.20)))
+                .overlay(Capsule().stroke(hairline(cs, 0.09)))
+        }
+    }
+
+    /// 滑块本身：材质 + 一点乳浊 + 上亮下暗的镜面描边 + 轻投影，做出"浮在凹槽上"的感觉。
+    private var thumbShape: some View {
+        Capsule(style: .continuous)
+            .fill(.regularMaterial)
+            .overlay(Capsule().fill(Color.white.opacity(cs == .dark ? 0.10 : 0.55)))
+            .overlay {
+                Capsule().stroke(
+                    LinearGradient(colors: [Color.white.opacity(cs == .dark ? 0.34 : 0.95),
+                                            Color.white.opacity(cs == .dark ? 0.10 : 0.30)],
+                                   startPoint: .top, endPoint: .bottom),
+                    lineWidth: 0.8)
+            }
+            .shadow(color: .black.opacity(cs == .dark ? 0.40 : 0.13), radius: 3, y: 1)
+    }
+}
+
 struct LibraryView: View {
     @ObservedObject var store: ShotStore
     @State private var compareSheet: Bool = false
@@ -2069,15 +2127,9 @@ struct LibraryView: View {
     @Environment(\.colorScheme) private var cs
     var body: some View {
         VStack(spacing: 0) {
-            Picker("分区", selection: $segment) {
-                Text("照片").tag(0)
-                Text("统计").tag(1)
-                Text("成长").tag(2)
-                Text("提示").tag(3)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 16).padding(.vertical, 10)
+            GlassSegmentedControl(selection: $segment, titles: ["照片", "统计", "成长", "提示"])
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
             Group {
                 switch segment {
                 case 0: listTab
