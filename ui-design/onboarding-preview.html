@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShotLog · 新手引导 & 帮助菜单预览</title>
+<style>
+  :root{
+    --bg:#FBFAF4; --card:#FCFAF6; --ink:#22323B; --muted:#8B959D;
+    --accent:#27A07F; --accent-soft:rgba(39,160,127,.10);
+    --ok:#1F7F69; --warn:#E07A3E;
+    --line:rgba(34,50,59,.09); --inset:rgba(34,50,59,.045);
+    --shadow:0 18px 50px rgba(31,42,48,.13), 0 2px 8px rgba(31,42,48,.06);
+    --page:#E9E5DC;
+  }
+  body.dark{
+    --bg:#1B1C1E; --card:#2A2B2E; --ink:#ECEEEE; --muted:#949CA3;
+    --accent:#2FB48E; --accent-soft:rgba(47,180,142,.16);
+    --ok:#2FB48E; --warn:#E08A50;
+    --line:rgba(255,255,255,.11); --inset:rgba(255,255,255,.06);
+    --shadow:0 18px 50px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+    --page:#111213;
+  }
+  *{box-sizing:border-box; -webkit-font-smoothing:antialiased}
+  [hidden]{display:none !important}
+  html,body{margin:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Helvetica Neue",sans-serif;
+    background:var(--page); color:var(--ink);
+    padding:28px 28px 60px; transition:background .25s,color .25s;
+  }
+
+  /* ---------- 页头 ---------- */
+  .head{max-width:1180px;margin:0 auto 20px;display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap}
+  .head h1{font-size:19px;margin:0;font-weight:600;letter-spacing:-.2px}
+  .head p{margin:4px 0 0;font-size:12.5px;color:var(--muted)}
+  .head .spacer{flex:1}
+  .ctrl{display:flex;gap:6px;background:var(--inset);padding:4px;border-radius:10px}
+  .ctrl button{
+    border:0;background:transparent;color:var(--muted);font:inherit;font-size:12px;
+    padding:6px 11px;border-radius:7px;cursor:pointer;transition:.18s;
+  }
+  .ctrl button:hover{color:var(--ink)}
+  .ctrl button[aria-pressed="true"]{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.10)}
+
+  /* ---------- 窗口 ---------- */
+  .stage{max-width:1180px;margin:0 auto}
+  .win{
+    width:900px;max-width:100%;height:592px;margin:0 auto;background:var(--bg);
+    border-radius:13px;box-shadow:var(--shadow);overflow:hidden;
+    display:flex;flex-direction:column;border:.5px solid var(--line);
+  }
+  .titlebar{
+    height:38px;display:flex;align-items:center;padding:0 14px;gap:8px;
+    border-bottom:.5px solid var(--line);background:color-mix(in srgb,var(--card) 65%,transparent);
+    flex:none;
+  }
+  .lights{display:flex;gap:8px}
+  .lights i{width:12px;height:12px;border-radius:50%;display:block}
+  .lights i:nth-child(1){background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+  .titlebar b{font-size:12.5px;font-weight:600;color:var(--muted);margin:0 auto;letter-spacing:.2px}
+
+  /* ---------- 引导主体 ---------- */
+  .onb{flex:1;display:grid;grid-template-columns:360px 1fr;min-height:0}
+  .art{
+    position:relative;display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(120% 90% at 15% 5%, color-mix(in srgb,var(--accent) 16%, transparent), transparent 62%),
+      radial-gradient(110% 80% at 90% 100%, color-mix(in srgb,var(--warn) 12%, transparent), transparent 60%),
+      var(--inset);
+    border-right:.5px solid var(--line);overflow:hidden;
+  }
+  .body{padding:36px 42px 24px;display:flex;flex-direction:column;justify-content:center;min-width:0}
+  .eyebrow{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  .body h2{font-size:25px;line-height:1.25;margin:10px 0 0;letter-spacing:-.4px;font-weight:650}
+  .body p.lead{font-size:13.5px;line-height:1.75;color:var(--muted);margin:12px 0 0;max-width:34em}
+  .pills{display:flex;gap:7px;flex-wrap:wrap;margin-top:16px}
+  .pill{
+    font-size:11.5px;padding:5px 10px;border-radius:99px;color:var(--accent);
+    background:var(--accent-soft);display:inline-flex;align-items:center;gap:5px;font-weight:500;
+  }
+  .pill.ghost{color:var(--muted);background:var(--inset)}
+  .notes{margin-top:24px;padding-top:0}
+  .note{font-size:11.5px;color:var(--muted);line-height:1.6;display:flex;gap:7px;align-items:flex-start;margin-top:6px}
+  .note svg{flex:none;margin-top:2px;opacity:.75}
+
+  .foot{display:flex;align-items:center;gap:14px;padding:0 42px 22px}
+  .dots{display:flex;gap:6px}
+  .dots i{width:6px;height:6px;border-radius:99px;background:var(--line);transition:.2s}
+  .dots i.on{width:18px;background:var(--accent)}
+  .foot .spacer{flex:1}
+  .btn{
+    font:inherit;font-size:12.5px;font-weight:550;border-radius:8px;padding:8px 16px;cursor:pointer;
+    border:.5px solid transparent;transition:.16s;
+  }
+  .btn.primary{background:var(--accent);color:#fff;box-shadow:0 1px 3px color-mix(in srgb,var(--accent) 45%, transparent)}
+  .btn.primary:hover{filter:brightness(1.05)}
+  .btn.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
+  .btn.ghost:hover{color:var(--ink)}
+  .link{font-size:12px;color:var(--muted);background:none;border:0;cursor:pointer;padding:6px 2px}
+  .link:hover{color:var(--ink)}
+
+  /* ---------- 左侧插画 ---------- */
+  .photos{position:relative;width:230px;height:250px}
+  .photo{
+    position:absolute;width:150px;height:196px;border-radius:12px;background:var(--card);
+    border:.5px solid var(--line);box-shadow:0 10px 26px rgba(20,30,36,.16);
+    overflow:hidden;
+  }
+  .photo::after{content:"";position:absolute;inset:0;opacity:.9}
+  .p1{left:6px;top:34px;transform:rotate(-8deg)}
+  .p1::after{background:linear-gradient(160deg,#9FC7B6,#4E8C7A 55%,#2C5C51)}
+  .p2{left:48px;top:20px;transform:rotate(2deg);z-index:2}
+  .p2::after{background:linear-gradient(150deg,#F0C9A0,#D08A5B 50%,#7E4630)}
+  .p3{left:92px;top:40px;transform:rotate(9deg)}
+  .p3::after{background:linear-gradient(150deg,#BFC9D8,#7E8CA3 55%,#404A5C)}
+
+  .floatcard{
+    position:absolute;z-index:5;bottom:6px;left:-6px;min-width:172px;
+    background:var(--card);border:.5px solid var(--line);border-radius:11px;
+    padding:10px 12px;box-shadow:0 8px 22px rgba(20,30,36,.16);
+  }
+  .floatcard .k{font-size:9.5px;color:var(--muted);display:flex;align-items:center;gap:4px}
+  .floatcard .k i{width:5px;height:5px;border-radius:2px;background:var(--accent);display:block}
+  .floatcard .v{font-size:14.5px;font-weight:650;margin-top:3px;font-variant-numeric:tabular-nums}
+  .floatcard .row{display:flex;gap:14px;margin-top:2px}
+
+  /* 参数网格插画 */
+  .grid9{display:grid;grid-template-columns:repeat(3,96px);gap:7px}
+  .cell{
+    background:var(--card);border:.5px solid var(--line);border-radius:9px;padding:7px 8px;
+    box-shadow:0 1px 2px rgba(20,30,36,.05);
+  }
+  .cell .k{font-size:8.5px;color:var(--muted);display:flex;gap:4px;align-items:center}
+  .cell .k i{width:5px;height:5px;border-radius:2px;background:var(--accent)}
+  .cell .v{font-size:11px;font-weight:650;margin-top:3px;font-variant-numeric:tabular-nums;line-height:1.3}
+  .cell.dim{opacity:.72}
+
+  /* 入口卡片插画 */
+  .entries{width:260px;display:flex;flex-direction:column;gap:11px}
+  .entry{
+    background:var(--card);border:.5px solid var(--line);border-radius:12px;padding:13px 14px;
+    box-shadow:0 6px 18px rgba(20,30,36,.10);display:flex;gap:11px;align-items:center;
+  }
+  .entry .ic{
+    width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex:none;
+    background:var(--accent-soft);color:var(--accent);
+  }
+  .entry .t{font-size:12px;font-weight:650}
+  .entry .s{font-size:10px;color:var(--muted);margin-top:2px;line-height:1.45}
+  .entry.rec{border-color:color-mix(in srgb,var(--accent) 45%, var(--line))}
+
+  /* 统计插画 */
+  .stats{margin-top:6px;display:flex;gap:8px;align-items:stretch}
+  .stat{background:var(--card);border:.5px solid var(--line);border-radius:11px;padding:10px 11px;flex:1;min-width:0}
+  .stat .lab{font-size:9px;color:var(--muted);letter-spacing:.02em}
+  .stat .big{font-size:17px;font-weight:680;font-variant-numeric:tabular-nums;margin-top:2px}
+  .ring{width:38px;height:38px;border-radius:50%;margin-top:6px;
+    background:conic-gradient(var(--accent) 0 78%, var(--inset) 78% 100%);
+    display:grid;place-items:center;position:relative}
+  .ring::after{content:"";position:absolute;inset:6px;border-radius:50%;background:var(--card)}
+  .heat{display:grid;grid-template-columns:repeat(8,1fr);gap:2px;margin-top:7px}
+  .heat i{height:7px;border-radius:2px;background:var(--inset)}
+  .heat i.a{background:color-mix(in srgb,var(--accent) 32%, transparent)}
+  .heat i.b{background:color-mix(in srgb,var(--accent) 62%, transparent)}
+  .heat i.c{background:var(--accent)}
+  .bars{display:flex;align-items:flex-end;gap:3px;height:34px;margin-top:6px}
+  .bars i{flex:1;background:color-mix(in srgb,var(--accent) 78%, transparent);border-radius:2px 2px 0 0}
+  .cap{font-size:9.5px;color:var(--muted);margin-top:5px}
+
+  /* ---------- 帮助菜单 ---------- */
+  .section{max-width:1180px;margin:44px auto 0}
+  .section h3{font-size:14px;margin:0 0 4px;font-weight:650;letter-spacing:-.1px}
+  .section .sub{font-size:12px;color:var(--muted);margin:0 0 16px}
+  .menuwrap{display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap}
+
+  .menubar{
+    background:var(--card);border:.5px solid var(--line);border-radius:9px;padding:0 10px;height:28px;
+    display:flex;align-items:center;gap:16px;box-shadow:0 2px 8px rgba(20,30,36,.06);
+    font-size:12px;color:var(--ink);position:relative;width:452px;
+  }
+  .menubar .app{display:flex;align-items:center}
+  .menubar .item{color:var(--ink);opacity:.85}
+  .menubar .item.help{
+    opacity:1;background:var(--accent);color:#fff;border-radius:5px;padding:3px 8px;margin-left:2px;
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 60%, transparent);
+  }
+  .menubar .r{margin-left:auto;display:flex;gap:10px;opacity:.55;font-size:11px}
+
+  .menu{
+    position:relative;margin-top:6px;width:236px;background:color-mix(in srgb,var(--card) 92%, transparent);
+    backdrop-filter:blur(20px);
+    border:.5px solid var(--line);border-radius:9px;padding:5px;
+    box-shadow:0 16px 40px rgba(20,30,36,.20), 0 1px 3px rgba(20,30,36,.10);
+  }
+  .mi{display:flex;align-items:center;gap:8px;padding:5px 9px;border-radius:6px;font-size:12px}
+  .mi .sc{margin-left:auto;color:var(--muted);font-size:11.5px;letter-spacing:.03em}
+  .mi.hot{background:var(--accent);color:#fff}
+  .mi.hot .sc{color:rgba(255,255,255,.8)}
+  .sep{height:1px;background:var(--line);margin:4px 8px}
+  .mi.disabled{opacity:.42}
+
+  .explain{flex:1;min-width:300px;display:flex;flex-direction:column;gap:10px}
+  .ex{display:flex;gap:10px;font-size:12px;line-height:1.6}
+  .ex b{font-weight:600}
+  .ex .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);margin-top:6px;flex:none}
+  .ex code{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+    background:var(--inset);padding:1px 5px;border-radius:4px;color:var(--ink);
+  }
+  .footnote{font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.6}
+  .toggle{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--muted)}
+  .switch{width:34px;height:20px;border-radius:99px;background:#d8d5cc;position:relative;cursor:pointer;transition:.2s}
+  body.dark .switch{background:#3a3d40}
+  .switch.on{background:var(--accent)}
+  .switch::after{content:"";position:absolute;width:16px;height:16px;border-radius:50%;background:#fff;top:2px;left:2px;transition:.2s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+  .switch.on::after{left:16px}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <div>
+    <h1>ShotLog · 新手引导 &amp; 帮助菜单</h1>
+    <p>三屏版。窗口按实际尺寸 900 × 592 画，点步骤切屏，右下角可切深色。</p>
+  </div>
+  <div class="spacer"></div>
+  <div class="ctrl" id="steps">
+    <button data-step="0" aria-pressed="true">1 欢迎</button>
+    <button data-step="1" aria-pressed="false">2 只读参数</button>
+    <button data-step="2" aria-pressed="false">3 怎么开始</button>
+  </div>
+  <div class="toggle">
+    <span>深色</span>
+    <div class="switch" id="sw"></div>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="win">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <b>ShotLog</b>
+    </div>
+
+    <div class="onb">
+      <!-- 左：插画 -->
+      <div class="art">
+        <!-- step 1 -->
+        <div class="photos" data-art="0">
+          <div class="photo p1"></div>
+          <div class="photo p2"></div>
+          <div class="photo p3"></div>
+          <div class="floatcard">
+            <div class="row">
+              <div><div class="k"><i></i>焦距</div><div class="v">24<span style="font-size:9px;font-weight:500">mm</span></div></div>
+              <div><div class="k"><i></i>光圈</div><div class="v">f/1.78</div></div>
+              <div><div class="k"><i></i>ISO</div><div class="v">400</div></div>
+            </div>
+          </div>
+        </div>
+        <!-- step 2 -->
+        <div class="grid9" data-art="1" hidden>
+          <div class="cell"><div class="k"><i></i>机型</div><div class="v">iPhone 15 Pro</div></div>
+          <div class="cell"><div class="k"><i></i>镜头</div><div class="v">主摄</div></div>
+          <div class="cell"><div class="k"><i></i>焦距</div><div class="v">24mm</div></div>
+          <div class="cell"><div class="k"><i></i>光圈</div><div class="v">f/1.78</div></div>
+          <div class="cell"><div class="k"><i></i>快门</div><div class="v">1/120 s</div></div>
+          <div class="cell"><div class="k"><i></i>ISO</div><div class="v">400</div></div>
+          <div class="cell dim"><div class="k"><i></i>曝光补偿</div><div class="v">−0.3 EV</div></div>
+          <div class="cell dim"><div class="k"><i></i>白平衡</div><div class="v">自动</div></div>
+          <div class="cell dim"><div class="k"><i></i>闪光灯</div><div class="v">关闭</div></div>
+        </div>
+        <!-- step 3 -->
+        <div class="entries" data-art="2" hidden>
+          <div class="entry rec">
+            <div class="ic">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                <rect x="2" y="3" width="12" height="10" rx="2"/><path d="M5 1.6v2M11 1.6v2M8 7v4M6 9h4"/>
+              </svg>
+            </div>
+            <div><div class="t">选择照片解析</div><div class="s">只分析你挑的那几张</div></div>
+          </div>
+          <div class="entry">
+            <div class="ic">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+                <path d="M2 8a6 6 0 0 1 10.2-4.2M14 8a6 6 0 0 1-10.2 4.2"/><path d="M12.4 1.2v2.8H9.6M3.6 14.8V12h2.8"/>
+              </svg>
+            </div>
+            <div><div class="t">自动扫描最近 500 张</div><div class="s">一次读完近况，统计更准</div></div>
+          </div>
+        </div>
+              </div>
+
+      <!-- 右：文案 -->
+      <div class="body">
+        <div class="eyebrow" id="eyebrow">第 1 步 · 共 4 步</div>
+
+        <div data-panel="0">
+          <h2>先看清自己怎么拍</h2>
+          <p class="lead">ShotLog 读你相册里照片自带的拍摄参数——机型、镜头、焦距、快门、ISO——再叠一层系统内置的视觉模型，把这堆数字整理成能读懂的拍摄习惯。</p>
+          <div class="pills">
+            <span class="pill">● 全程本地</span>
+            <span class="pill">● 不上传</span>
+            <span class="pill">● 系统原生 Vision</span>
+          </div>
+        </div>
+
+        <div data-panel="1" hidden>
+          <h2>只读参数，不碰照片</h2>
+          <p class="lead">所有数据来自照片自带的 EXIF 与 macOS 的 Vision 框架。ShotLog 不会修改、导出或上传任何一张照片，也不会自己发起网络请求。</p>
+          <div class="pills">
+            <span class="pill ghost">不修改相册</span>
+            <span class="pill ghost">不导出照片</span>
+            <span class="pill ghost">离线计算</span>
+          </div>
+        </div>
+
+        <div data-panel="2" hidden>
+          <h2>两种开始方式</h2>
+          <p class="lead">想先试试水就手动挑几张；想把近况看明白就整库扫一遍——统计画像只有在样本够多时才准。</p>
+          <div class="pills">
+            <span class="pill ghost">首次会请求相册权限</span>
+            <span class="pill ghost">之后不再打扰</span>
+          </div>
+        </div>
+
+        <div class="notes" id="notes">
+          <!-- 每步一句注解，js 切换 -->
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="dots" id="dots"><i class="on"></i><i></i><i></i><i></i></div>
+      <div class="spacer"></div>
+      <button class="link" id="skip">跳过</button>
+      <button class="btn ghost" id="prev">上一步</button>
+      <button class="btn primary" id="next">下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 帮助菜单 ================= -->
+<div class="section">
+  <h3>菜单栏 Help</h3>
+  <p class="sub">放在系统「帮助」菜单位（<code style="font-family:ui-monospace;font-size:11px">CommandGroup(replacing: .help)</code>），中文系统里显示为「帮助」。</p>
+
+  <div class="menuwrap">
+    <div>
+      <div class="menubar">
+        <span class="app" aria-label="Apple"><svg width="11" height="13" viewBox="0 0 12 14" fill="currentColor"><path d="M9.6 7.4c0-1.5 1.2-2.2 1.3-2.3-.7-1-1.8-1.2-2.2-1.2-.9-.1-1.8.6-2.3.6-.5 0-1.2-.6-2-.5-1 0-2 .6-2.5 1.5-1.1 1.9-.3 4.7.8 6.2.5.7 1.1 1.5 1.9 1.5.8 0 1.1-.5 2-.5.9 0 1.2.5 2 .5.8 0 1.4-.8 1.9-1.5.4-.6.7-1.2.9-1.9-1.7-.6-1.8-2.3-1.8-2.4z"/><path d="M8.3 2.6c.4-.5.7-1.2.6-1.9-.6 0-1.4.4-1.8 1-.4.4-.7 1.2-.6 1.9.7.1 1.4-.4 1.8-1z"/></svg></span>
+        <span class="item">ShotLog</span>
+        <span class="item">文件</span>
+        <span class="item">编辑</span>
+        <span class="item">显示</span>
+        <span class="item">窗口</span>
+        <span class="item help">帮助</span>
+        <div class="r"><span>16:34</span></div>
+      </div>
+
+      <div class="menu">
+        <div class="mi hot">ShotLog 帮助<span class="sc">⌘?</span></div>
+        <div class="sep"></div>
+        <div class="mi">新手引导<span class="sc">⌘⇧H</span></div>
+        <div class="mi">隐私与数据处理<span class="sc"></span></div>
+        <div class="mi disabled">键盘快捷键<span class="sc"></span></div>
+        <div class="sep"></div>
+        <div class="mi">打开 GitHub 仓库<span class="sc"></span></div>
+        <div class="sep"></div>
+        <div class="mi">关于 ShotLog<span class="sc"></span></div>
+      </div>
+    </div>
+
+    <div class="explain">
+      <div class="ex"><span class="dot"></span><div><b>ShotLog 帮助 ⌘?</b> — 重新打开这套引导（3 屏，从第 1 步开始）。首次启动也会自动出现一次。</div></div>
+      <div class="ex"><span class="dot"></span><div><b>新手引导</b> — 同上，另给一个不带快捷键的入口，方便鼠标用户。</div></div>
+      <div class="ex"><span class="dot"></span><div><b>隐私与数据处理</b> — 弹出说明面板：读哪些字段、数据落在哪两个文件、如何一键清空。</div></div>
+      <div class="ex"><span class="dot"></span><div><b>打开 GitHub 仓库</b> — <code>NSWorkspace.shared.open</code> 到 <code>github.com/Tzy666xd/ShotLog</code>。</div></div>
+      <div class="ex"><span class="dot"></span><div><b>关于 ShotLog</b> — 用系统标准的关于面板，显示版本号与版权。</div></div>
+      <p class="footnote">「键盘快捷键」先置灰：等真正加上全局快捷键再启用，避免菜单里点开是空列表。</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  const notes = [
+    '<div class="note">引导首次启动自动出现，之后可在「帮助 › 新手引导」重看</div><div class="note">右上角「跳过」直接进入主界面，不再重复弹出</div>',
+    '<div class="note">参数卡片就是详情页里那块 3×3 网格，配色与主界面一致</div><div class="note">文档 / 截图会被 Visual 模型识别并从统计里剔除，避免占比失真</div>',
+    '<div class="note">两个入口做完引导后仍可随时用：工具栏「＋」与 ⋯ 菜单</div><div class="note">扫描上限 500 张，取最近拍摄的那批</div>',
+    '<div class="note">引导最后一屏的按钮会变成「开始使用」，看完直接落到选片页</div>'
+  ];
+
+  let step = 0;
+  const total = 3;
+
+  function render(){
+    document.querySelectorAll('[data-panel]').forEach(el => el.hidden = +el.dataset.panel !== step);
+    document.querySelectorAll('[data-art]').forEach(el => el.hidden = +el.dataset.art !== step);
+    document.getElementById('dots').innerHTML =
+      Array.from({length: total}, (_, i) => `<i class="${i === step ? 'on' : ''}"></i>`).join('');
+    document.getElementById('eyebrow').textContent = `第 ${step + 1} 步 · 共 ${total} 步`;
+    document.getElementById('notes').innerHTML = notes[step];
+    document.getElementById('prev').style.visibility = step === 0 ? 'hidden' : 'visible';
+    document.getElementById('next').textContent = step === total - 1 ? '开始使用' : '下一步';
+    document.querySelectorAll('#steps button').forEach(b => b.setAttribute('aria-pressed', String(+b.dataset.step === step)));
+  }
+
+  document.getElementById('steps').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    step = +b.dataset.step; render();
+  });
+  document.getElementById('next').addEventListener('click', () => { step = Math.min(total - 1, step + 1); render(); });
+  document.getElementById('prev').addEventListener('click', () => { step = Math.max(0, step - 1); render(); });
+  document.getElementById('skip').addEventListener('click', () => { step = total - 1; render(); });
+
+  const sw = document.getElementById('sw');
+  sw.addEventListener('click', () => {
+    document.body.classList.toggle('dark');
+    sw.classList.toggle('on');
+  });
+
+  const mStep = location.search.match(/step=(\d)/);
+  if (mStep) step = Math.max(0, Math.min(total - 1, +mStep[1]));
+  if (location.search.includes('dark')) {
+    document.body.classList.add('dark');
+    sw.classList.add('on');
+  }
+  render();
+</script>
+</body>
+</html>

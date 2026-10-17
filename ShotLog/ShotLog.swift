@@ -2823,10 +2823,342 @@ struct TipsView: View {
     }
 }
 
+// MARK: - 新手引导与帮助中心
+/// 菜单栏「帮助」和首启引导共用的一份 UI 状态。
+/// 用单例的原因：`Commands` 拿不到窗口里的 `@State`，而引导与隐私面板都要能由菜单唤起。
+final class HelpCenter: ObservableObject {
+    static let shared = HelpCenter()
+    @Published var showOnboarding = false
+    @Published var showPrivacy = false
+    private init() {}
+
+    func openOnboarding() {
+        showPrivacy = false
+        showOnboarding = true
+    }
+    func openPrivacy() { showPrivacy = true }
+}
+
+/// 首次启动的三屏引导。
+/// 纯静态展示，不碰相册、不触发权限——真正的授权仍在 PermissionView / 扫描入口里请求，
+/// 免得用户刚打开 app 就被系统弹窗打断。
+struct OnboardingView: View {
+    var onFinish: () -> Void
+    @Environment(\.colorScheme) private var cs
+    @State private var step = 0
+    private let totalSteps = 3
+
+    private let titles = ["先看清自己怎么拍", "只读参数，不碰照片", "怎么开始"]
+    private let leads = [
+        "ShotLog 读你相册里照片自带的拍摄参数——机型、镜头、焦距、快门、ISO——再叠一层系统内置的视觉模型，把这堆数字整理成能读懂的拍摄习惯。",
+        "所有数据来自照片自带的 EXIF 与 macOS 的 Vision 框架。ShotLog 不会修改、导出或上传任何一张照片，也不会自己发起网络请求。",
+        "想先试试水就手动挑几张；想把近况看明白就整库扫一遍——统计画像只有在样本够多时才准。",
+    ]
+    private let pills: [[String]] = [
+        ["全程本地", "不上传", "系统原生 Vision"],
+        ["不修改相册", "不导出照片", "离线计算"],
+        ["首次会请求相册权限", "之后不再打扰"],
+    ]
+    private let notes: [[String]] = [
+        ["参数卡片、画面识别、统计画像，都在一个窗口里",
+         "首次打开只做一件事：把相册读一遍，建立你自己的基线"],
+        ["数据只落在本机：entries.json 与 growth.json",
+         "文档、截图会被识别出来并从统计里剔除，避免占比失真"],
+        ["「选择照片」在工具栏 ＋；「扫描」在 ⋯ 菜单",
+         "随时可以从「帮助 › 新手引导」重看这套引导"],
+    ]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                art
+                textPanel
+            }
+            footer
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(schemeBg(cs))
+    }
+
+    // MARK: 左侧插画
+    private var art: some View {
+        ZStack {
+            LinearGradient(colors: [Luma.accent.opacity(cs == .dark ? 0.18 : 0.14),
+                                    Luma.warn.opacity(cs == .dark ? 0.11 : 0.08)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            switch step {
+            case 0: photoStack
+            case 1: paramPreview
+            default: entryPreview
+            }
+        }
+        .frame(width: 336)
+        .overlay(alignment: .trailing) { Rectangle().fill(hairline(cs)).frame(width: 1) }
+    }
+
+    private var photoStack: some View {
+        ZStack {
+            photoCard([Color(hex: 0x9FC7B6), Color(hex: 0x2C5C51)], rotate: -8, dx: -50, dy: 22)
+            photoCard([Color(hex: 0xF0C9A0), Color(hex: 0x7E4630)], rotate: 2, dx: 0, dy: 0)
+            photoCard([Color(hex: 0xBFC9D8), Color(hex: 0x404A5C)], rotate: 9, dx: 52, dy: 24)
+            paramFloat.offset(x: -46, y: 104)
+        }
+    }
+    private func photoCard(_ colors: [Color], rotate: Double, dx: CGFloat, dy: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing))
+            .frame(width: 118, height: 156)
+            .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(.white.opacity(0.18)))
+            .shadow(color: .black.opacity(0.18), radius: 14, y: 7)
+            .rotationEffect(.degrees(rotate))
+            .offset(x: dx, y: dy)
+    }
+    private var paramFloat: some View {
+        HStack(spacing: 14) {
+            floatItem("焦距", "24mm")
+            floatItem("光圈", "f/1.78")
+            floatItem("ISO", "400")
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(hairline(cs)))
+        .shadow(color: .black.opacity(0.14), radius: 12, y: 5)
+    }
+    private func floatItem(_ k: String, _ v: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Circle().fill(Luma.accent).frame(width: 4, height: 4)
+                Text(k).font(.system(size: 9.5)).foregroundStyle(.secondary)
+            }
+            Text(v).font(.system(size: 13, weight: .semibold, design: .rounded))
+        }
+    }
+
+    /// 复用详情页那套参数小卡片，让引导里看到的就是真实界面的样子。
+    private var paramPreview: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 7), count: 3), spacing: 7) {
+            ParamTile(icon: "camera", label: "机型", value: "15 Pro")
+            ParamTile(icon: "camera.aperture", label: "镜头", value: "主摄")
+            ParamTile(icon: "arrow.left.and.right", label: "焦距", value: "24mm")
+            ParamTile(icon: "circle.dotted", label: "光圈", value: "f/1.78")
+            ParamTile(icon: "timer", label: "快门", value: "1/120")
+            ParamTile(icon: "camera.metering.center.weighted", label: "ISO", value: "400")
+            ParamTile(icon: "plusminus.circle", label: "曝光", value: "−0.3")
+            ParamTile(icon: "sun.max", label: "白平衡", value: "自动")
+            ParamTile(icon: "bolt.fill", label: "闪光", value: "关闭")
+        }
+        .frame(width: 288)
+        .allowsHitTesting(false)
+    }
+
+    private var entryPreview: some View {
+        VStack(spacing: 11) {
+            entryCard("photo.badge.plus", "选择照片解析", "只分析你挑的那几张", highlight: true)
+            entryCard("arrow.triangle.2.circlepath", "自动扫描最近 500 张", "一次读完近况，统计更准", highlight: false)
+        }
+        .frame(width: 258)
+    }
+    private func entryCard(_ icon: String, _ title: String, _ sub: String, highlight: Bool) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Luma.accent)
+                .frame(width: 30, height: 30)
+                .background(Luma.accent.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                Text(sub).font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 13).padding(.vertical, 12)
+        .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(highlight ? Luma.accent.opacity(0.45) : hairline(cs)))
+        .shadow(color: .black.opacity(cs == .dark ? 0 : 0.08), radius: 9, y: 4)
+    }
+
+    // MARK: 右侧文案
+    private var textPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Spacer(minLength: 0)
+            Text("第 \(step + 1) 步 · 共 \(totalSteps) 步")
+                .font(.system(size: 10.5, weight: .semibold))
+                .kerning(1.4)
+                .foregroundStyle(.secondary)
+            Text(titles[step])
+                .font(.system(size: 25, weight: .semibold))
+                .padding(.top, 10)
+            Text(leads[step])
+                .font(.system(size: 13.5))
+                .foregroundStyle(.secondary)
+                .lineSpacing(4)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 12)
+            HStack(spacing: 7) {
+                ForEach(pills[step], id: \.self) { p in
+                    Text(p)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(step == 0 ? Luma.accent : Color.secondary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(step == 0 ? Luma.accent.opacity(0.10) : insetFill(cs), in: Capsule())
+                }
+            }
+            .padding(.top, 16)
+
+            VStack(alignment: .leading, spacing: 7) {
+                ForEach(notes[step], id: \.self) { n in
+                    HStack(alignment: .top, spacing: 7) {
+                        Circle().fill(Luma.accent.opacity(0.55)).frame(width: 4, height: 4).padding(.top, 6)
+                        Text(n).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(.top, 24)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    // MARK: 底部
+    private var footer: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                ForEach(0..<totalSteps, id: \.self) { i in
+                    Capsule()
+                        .fill(i == step ? Luma.accent : hairline(cs, 0.10))
+                        .frame(width: i == step ? 18 : 6, height: 6)
+                        .animation(.easeOut(duration: 0.2), value: step)
+                }
+            }
+            Spacer()
+            if step < totalSteps - 1 {
+                Button("跳过") { onFinish() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+            if step > 0 {
+                onbButton("上一步", primary: false) { step = max(0, step - 1) }
+            }
+            onbButton(step == totalSteps - 1 ? "开始使用" : "下一步", primary: true) {
+                if step == totalSteps - 1 { onFinish() } else { step = min(totalSteps - 1, step + 1) }
+            }
+        }
+        .padding(.horizontal, 40)
+        .padding(.top, 6)
+        .padding(.bottom, 26)
+    }
+    private func onbButton(_ title: String, primary: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .padding(.horizontal, 16).padding(.vertical, 7)
+                .background(primary ? Luma.accent : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .foregroundStyle(primary ? Color.white : Color.secondary)
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(primary ? Color.clear : hairline(cs)))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// 菜单栏「隐私与数据处理」打开的说明面板。写清楚读什么、不做什么、数据在哪。
+struct PrivacyView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.colorScheme) private var cs
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("隐私与数据处理").font(.headline)
+                Spacer()
+                Button("完成") { dismiss() }.buttonStyle(.borderedProminent).controlSize(.small)
+            }
+            Text("ShotLog 全程在本机计算，不联网、不上传照片或参数。")
+                .font(.subheadline)
+            privacyRow("读什么", "照片的 EXIF（机型、镜头、焦距、光圈、快门、ISO、曝光补偿、白平衡、闪光灯）与拍摄时间；画面内容由 macOS 内置的 Vision 模型在本机推理，模型权重在系统里，app 不打包任何模型文件。")
+            privacyRow("不做什么", "不修改、不导出、不上传相册里的照片；不发起网络请求；不收集设备信息。")
+            privacyRow("数据落在哪", "解析结果 entries.json 与每日快照 growth.json，都在 ~/Library/Application Support/ShotLog/。")
+            HStack(spacing: 10) {
+                Button("打开数据文件夹") {
+                    let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("ShotLog", isDirectory: true)
+                    if !FileManager.default.fileExists(atPath: dir.path) {
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                    }
+                    NSWorkspace.shared.open(dir)
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+            }
+            Text("工具栏 ⋯ › 清空解析结果 会同时删掉这两个文件。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(width: 500)
+        .background(schemeBg(cs))
+    }
+    private func privacyRow(_ title: String, _ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(Luma.accent)
+            Text(text).font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(insetFill(cs), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+}
+
+/// 菜单栏「帮助」。放在系统 Help 位，中文系统里显示为「帮助」。
+struct HelpCommands: Commands {
+    @ObservedObject var help: HelpCenter
+    var body: some Commands {
+        CommandGroup(replacing: .help) {
+            Button("ShotLog 帮助") { help.openOnboarding() }
+                .keyboardShortcut("/", modifiers: [.command, .shift])
+            Button("新手引导") { help.openOnboarding() }
+            Divider()
+            Button("隐私与数据处理") { help.openPrivacy() }
+            Divider()
+            Button("打开 GitHub 仓库") {
+                if let url = URL(string: "https://github.com/Tzy666xd/ShotLog") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Divider()
+            Button("关于 ShotLog") { NSApp.orderFrontStandardAboutPanel(nil) }
+        }
+    }
+}
+
 struct RootView: View {
     @Environment(\.colorScheme) private var cs
+    @EnvironmentObject private var help: HelpCenter
     @StateObject private var store = ShotStore()
+    /// 只在首次启动（或从菜单重新打开）时出现，跳过/看完都会写回 true。
+    @AppStorage("shotlog.onboarding.done") private var onboardingDone = false
+
     var body: some View {
+        Group {
+            if !onboardingDone || help.showOnboarding {
+                OnboardingView {
+                    onboardingDone = true
+                    help.showOnboarding = false
+                }
+            } else {
+                mainContent
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(schemeBg(cs))
+        .sheet(isPresented: $help.showPrivacy) { PrivacyView() }
+    }
+
+    private var mainContent: some View {
         NavigationStack {
             Group {
                 if store.isScanning {
@@ -3048,6 +3380,8 @@ struct ImageCell: View {
 }
 
 @main struct ShotLogApp: App {
+    /// 引导/隐私面板的开关，同时被窗口和菜单栏「帮助」使用。
+    @StateObject private var help = HelpCenter.shared
     init() {
         // 未捕获的 NSException 落盘，之后崩溃可直接在 ~/Library/Logs/ShotLog_exceptions.log 看到原因
         NSSetUncaughtExceptionHandler { ex in
@@ -3067,7 +3401,9 @@ struct ImageCell: View {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .environmentObject(help)
                 .frame(minWidth: 760, minHeight: 540)
         }
+        .commands { HelpCommands(help: help) }
     }
 }
