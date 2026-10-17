@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+._*
+
+# 构建产物（build-and-sign.sh 只往 /tmp 和桌面的 .app 写，不进仓库）
+build/
+dist/
+*.app
+*.cstemp
+_CodeSignature/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
