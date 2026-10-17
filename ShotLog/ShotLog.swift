@@ -1771,6 +1771,7 @@ struct StatsView: View {
     private func aestheticSection(_ s: GlobalStats) -> some View {
         if s.visionCount > 0 {
             let maxC = max(s.aestheticBuckets.map(\.count).max() ?? 1, 1)
+            let photoTotal = s.aestheticBuckets.reduce(0) { $0 + $1.count }
             Card(title: "画面美学", trailing: "Vision 内置模型") {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -1784,7 +1785,8 @@ struct StatsView: View {
                     }
                     VStack(alignment: .leading, spacing: 7) {
                         ForEach(s.aestheticBuckets) { b in
-                            shareRow(label: b.label, count: b.count, maxCount: maxC, tint: Luma.aiEstimate)
+                            shareRow(label: b.label, count: b.count, maxCount: maxC,
+                                     tint: Luma.aiEstimate, total: photoTotal)
                         }
                     }
                     if s.nonPhotoCount > 0 {
@@ -2135,18 +2137,25 @@ struct StatsView: View {
     }
 
     // MARK: 小工具
-    private func shareRow(label: String, count: Int, maxCount: Int, tint: Color) -> some View {
+    /// 分布条。`total` 给了就在张数后面补占比——美学分布里最大的一档能占到近一半，
+    /// 光看绝对张数不容易判断「这是我分布窄，还是这一档特别突出」。
+    /// 条形宽度用 GeometryReader 自适应，原来写死 190 宽，卡片一拉宽右边就空一大片。
+    private func shareRow(label: String, count: Int, maxCount: Int, tint: Color, total: Int? = nil) -> some View {
         HStack(spacing: 10) {
             Text(label).font(.subheadline).lineLimit(1)
                 .frame(minWidth: 56, maxWidth: 110, alignment: .leading)
-            ZStack(alignment: .leading) {
-                Capsule().fill(tint.opacity(0.12))
-                Capsule().fill(count > 0 ? tint : tint.opacity(0.25))
-                    .frame(width: max(6, CGFloat(count) / CGFloat(max(maxCount, 1)) * 190))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(tint.opacity(0.12))
+                    Capsule().fill(count > 0 ? tint : tint.opacity(0.25))
+                        .frame(width: max(6, CGFloat(count) / CGFloat(max(maxCount, 1)) * geo.size.width))
+                }
             }
-            .frame(width: 190, height: 8)
-            Text("\(count)").font(.subheadline).monospacedDigit()
-                .frame(width: 32, alignment: .trailing)
+            .frame(height: 8)
+            Text(total.map { "\(count) · \(pct(count, $0))" } ?? "\(count)")
+                .font(.subheadline).monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: total == nil ? 32 : 96, alignment: .trailing)
         }
     }
     private func pct(_ n: Int, _ total: Int) -> String {
