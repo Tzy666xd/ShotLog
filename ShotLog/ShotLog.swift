@@ -39,6 +39,12 @@ private func schemeBg(_ cs: ColorScheme) -> Color { cs == .dark ? Luma.bgDark : 
 private func insetFill(_ cs: ColorScheme) -> Color {
     cs == .dark ? Color.white.opacity(0.07) : Luma.ink.opacity(0.04)
 }
+/// 描边 / 轨道 / 网格线用的极浅线。
+/// 原来这些地方一律写 `Luma.ink.opacity(0.06)`，深色卡上再叠墨色等于把线擦掉——
+/// 深色模式下卡片没有边框、进度条轨道看不见。统一走这个函数，深色换成白色薄层。
+private func hairline(_ cs: ColorScheme, _ alpha: Double = 0.06) -> Color {
+    cs == .dark ? Color.white.opacity(min(0.9, alpha * 2.2)) : Luma.ink.opacity(alpha)
+}
 
 // MARK: - enum domain
 enum LightEnvironment: String, CaseIterable, Equatable {
@@ -187,7 +193,7 @@ struct Card<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Luma.ink.opacity(cs == .dark ? 0.12 : 0.06)))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(hairline(cs)))
         .shadow(color: .black.opacity(cs == .dark ? 0 : 0.05), radius: 10, y: 3)
     }
     private var cardBackground: Color { schemeCard(cs) }
@@ -211,7 +217,7 @@ struct Tile<Content: View>: View {
                 }
             }
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Luma.ink.opacity(cs == .dark ? 0.12 : 0.06)))
+                .stroke(hairline(cs)))
     }
 }
 
@@ -275,6 +281,20 @@ struct ExifEntry: Identifiable, Codable, Equatable {
 }
 
 // MARK: - services (real Photos scanning + analyzers)
+/// `PHImageManager` 的 completion 不保证只回调一次（先给降级图、再给终图，或失败时先给占位再给 nil）。
+/// `withCheckedContinuation` 重复 resume 会直接触发 "SWIFT TASK CONTINUATION MISUSE" 崩溃，
+/// 所以每个回调都先 claim 一次，只有第一个到的能 resume。
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var done = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if done { return false }
+        done = true
+        return true
+    }
+}
+
 private enum Helper {
     struct AdviceItem: Identifiable, Equatable {
         let id = UUID()
@@ -336,9 +356,11 @@ private enum Helper {
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [identifier], options: nil)
         guard let asset = fetched.firstObject else { return nil }
         let data: Data? = await withCheckedContinuation { cont in
+            let once = ResumeOnce()
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = true
             PHImageManager.default().requestImageDataAndOrientation(for: asset, options: opts) { d, _, _, _ in
+                guard once.claim() else { return }
                 cont.resume(returning: d)
             }
         }
@@ -368,7 +390,11 @@ private enum Helper {
         // 35mm 等效焦距：手机基本不写，相机多半也不写，读到就是意外之喜
         let focal35 = (exif["FocalLengthIn35mmFilm"] as? NSNumber)?.intValue
         let aperture = Helper.number(exif, "FNumber")
-        let iso = (exif["ISOSpeedRatings"] as? [NSNumber])?.first?.intValue
+        // ISO 有三种写法：现代照片多是 ISOSpeedRatings 数组，部分机型只写单个数值，
+        // 还有一批写的是 EXIF 2.3 才引入的 PhotographicSensitivity——只读数组会漏掉后两类。
+        let iso = ((exif["ISOSpeedRatings"] as? [NSNumber])?.first
+                   ?? (exif["ISOSpeedRatings"] as? NSNumber)
+                   ?? (exif["PhotographicSensitivity"] as? NSNumber))?.intValue
         let shutterCaptured = Helper.number(exif, "ExposureTime")
         let ev = Helper.number(exif, "ExposureBiasValue")
         // Flash 位 0 才代表“已触发”，整值转 Bool 会把 0x10（未触发）误判为开启
@@ -429,12 +455,14 @@ private enum Helper {
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
         guard let asset = fetched.firstObject else { return nil }
         let ns: NSImage? = await withCheckedContinuation { cont in
+            let once = ResumeOnce()
             let opts = PHImageRequestOptions()
             opts.isNetworkAccessAllowed = false
             opts.deliveryMode = .fastFormat
             PHImageManager.default().requestImage(for: asset,
                 targetSize: .init(width: Int(size), height: Int(size)),
                 contentMode: .aspectFill, options: opts) { image, _ in
+                guard once.claim() else { return }
                 cont.resume(returning: image)
             }
         }
@@ -451,13 +479,16 @@ private enum Helper {
     /// `.opportunistic` 也不行——它的第一次回调是 degraded 占位图，
     /// 用一次性 continuation 接，接到的永远是那张低清版（注释里写着「取最后一次」，实际取到的是第一次）。
     /// 这里直接 `.highQualityFormat`：只回调最终图，按 Hero 的实际比例要像素。
+    /// 尺寸口径：Hero 高 220pt、最宽约 900pt，@2x 是 1800×440，取 1800×600 已足够；
+    /// 之前要 3000×800，单张解码后 9.6MB，同一条 NSCache 里存十几张就把列表缩略图全挤出去。
     @MainActor
-    static func heroImageForAsset(id: String, width: Int = 3000, height: Int = 800) async -> NSImage? {
+    static func heroImageForAsset(id: String, width: Int = 1800, height: Int = 600) async -> NSImage? {
         let key = "hero-\(id)-\(width)" as NSString
         if let hit = thumbCache.store.object(forKey: key) { return hit }
         let fetched = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
         guard let asset = fetched.firstObject else { return nil }
         let ns: NSImage? = await withCheckedContinuation { cont in
+            let once = ResumeOnce()
             let opts = PHImageRequestOptions()
             // iCloud「优化存储」时本地只有占位图，不开网络就只能拿到那张蒙了的
             opts.isNetworkAccessAllowed = true
@@ -467,6 +498,7 @@ private enum Helper {
             PHImageManager.default().requestImage(for: asset,
                 targetSize: .init(width: width, height: height),
                 contentMode: .aspectFill, options: opts) { image, _ in
+                guard once.claim() else { return }
                 cont.resume(returning: image)
             }
         }
@@ -944,7 +976,9 @@ struct GlobalStats: Equatable {
     let lensUsage: [LensUsage]
     let cameraModels: [NamedCount]
     let meanISO: Double, slowShutterRate: Double
-    let blurRate: Double, blownRate: Double, underRate: Double
+    /// 糊片率（快门慢于 1/30s）与高感率（ISO > 1600）分开统计——前者是手抖，后者是噪点
+    let blurRate: Double, noiseRate: Double
+    let blownRate: Double, underRate: Double
     let flashRate: Double, goldenRate: Double
     /// 连续参数直方图
     let isoBuckets: [DistBucket]
@@ -1006,7 +1040,11 @@ private enum StatUtility {
         let isoValues = real.compactMap { e in e.iso }.map { v in Double(v) }
         let secList = real.compactMap { e in Helper.secondsOf(e.shutterSpeed) }
         let slowCount = secList.filter { $0 > Helper.slowShutterSeconds }.count
-        let blurCount = real.filter { ($0.iso ?? 0) > 1600 || (Helper.secondsOf($0.shutterSpeed) ?? 0) > Helper.slowShutterSeconds }.count
+        // 糊片只由慢门定义。原来把「ISO > 1600」也算进糊片，
+        // 于是高感光的噪点片被记成「手持不稳」，「手持稳定」这一项评分也被噪声拉低——
+        // 高 ISO 和手抖是两件不相干的事。拆成 blurRate（慢门）/ noiseRate（高感）。
+        let blurCount = slowCount
+        let noiseCount = real.filter { ($0.iso ?? 0) > 1600 }.count
         let blownCount = real.filter { ($0.exposureComp ?? 0) > 1.3 }.count
         let underCount = real.filter { ($0.exposureComp ?? 0) < -1.3 }.count
         let flashCount = real.filter { $0.flashOn == true }.count
@@ -1014,6 +1052,7 @@ private enum StatUtility {
         let meanISO = isoValues.isEmpty ? 0 : isoValues.reduce(0, +) / Double(isoValues.count)
         let slowShutterRate = Double(slowCount) / Double(realCount)
         let blurRate = Double(blurCount) / Double(realCount)
+        let noiseRate = Double(noiseCount) / Double(realCount)
         let blownRate = Double(blownCount) / Double(realCount)
         let underRate = Double(underCount) / Double(realCount)
         let flashRate = Double(flashCount) / Double(realCount)
@@ -1028,8 +1067,11 @@ private enum StatUtility {
             // 日出后 / 日落前，用整点近似
             if (h >= 5 && h < 8) || (h >= 16 && h < 19) { golden += 1 }
         }
-        let buckets = starts.enumerated().map { i, hour in
-            TimeBucket(hour: hour, label: "\(hour)-\(i == 5 ? 24 : starts[i + 1])", count: tCounts[i])
+        let buckets = starts.enumerated().map { i, hour -> TimeBucket in
+            // 末档的右端点必须是 24：原来写成 `i == 5 ? 24 : starts[i + 1]`，
+            // 靠三元短路才没越界，starts 一旦增删元素就会直接崩在 `starts[6]`。
+            let end = i + 1 < starts.count ? starts[i + 1] : 24
+            return TimeBucket(hour: hour, label: "\(hour)-\(end)", count: tCounts[i])
         }
         let goldenRate = total == 0 ? 0 : Double(golden) / Double(total)
 
@@ -1174,7 +1216,7 @@ private enum StatUtility {
             lightCounts: light, supportCounts: support,
             lensUsage: orderedLens, cameraModels: cameraModels,
             meanISO: meanISO, slowShutterRate: slowShutterRate,
-            blurRate: blurRate, blownRate: blownRate, underRate: underRate,
+            blurRate: blurRate, noiseRate: noiseRate, blownRate: blownRate, underRate: underRate,
             flashRate: flashRate, goldenRate: goldenRate,
             isoBuckets: isoBuckets, apertureBuckets: apertureBuckets,
             shutterBuckets: shutterBuckets, focalBuckets: focalBuckets, evBuckets: evBuckets,
@@ -1221,6 +1263,31 @@ private enum GrowthStore {
     }
 }
 
+// MARK: - 解析结果缓存
+/// 解析一次 500 张要十几秒（每张还要跑一次 Vision），原来每次启动都从零开始：
+/// 关掉窗口再打开，列表又空了，只能重新扫一遍。这里把结果落盘，启动直接恢复。
+///
+/// 只缓存解析结果，不缓存图片。新增字段都是 Optional，`decodeIfPresent` 能把旧缓存解成 nil，
+/// 所以以后加字段不会让老缓存读不出来（读不出来时退回空列表，等于重新扫）。
+@MainActor
+private enum EntryCache {
+    private static let base: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("ShotLog", isDirectory: true)
+    private static let path: URL = base.appendingPathComponent("entries.json")
+
+    static func load() -> [ExifEntry] {
+        guard let data = try? Data(contentsOf: path) else { return [] }
+        return (try? JSONDecoder().decode([ExifEntry].self, from: data)) ?? []
+    }
+    static func save(_ es: [ExifEntry]) {
+        guard !es.isEmpty else { return }
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true, attributes: nil)
+        if let data = try? JSONEncoder().encode(es) { try? data.write(to: path, options: .atomic) }
+    }
+    static func clear() {
+        try? FileManager.default.removeItem(at: path)
+    }
+}
+
 // MARK: - store
 @MainActor final class ShotStore: ObservableObject {
     @Published var entries: [ExifEntry] = []
@@ -1236,6 +1303,13 @@ private enum GrowthStore {
     /// 注意：这里只读不请求；真正首次未确定时仍由 ensurePermission() 弹系统框。
     init() {
         refreshGrant()
+        // 有上次的解析结果就直接接着看，不用每次启动重扫 500 张。
+        // 读盘 + 解码约几十毫秒，比重新跑一遍 Vision 便宜三个数量级。
+        let cached = EntryCache.load()
+        if !cached.isEmpty {
+            entries = cached.sorted { $0.capturedAt < $1.capturedAt }
+            hasScanned = true
+        }
     }
 
     /// 只同步系统里真实的授权状态（不弹窗）：init 与回到前台时调用。
@@ -1254,6 +1328,9 @@ private enum GrowthStore {
     /// 用户在导入视图里勾选了资产标识符后，由这里并发解析 EXIF 并合并去重。
     func parseSelection(_ identifiers: [String]) async {
         guard !identifiers.isEmpty else { return }
+        // 重入保护：连点两次「解析」会同时跑两个批次，isScanning 互相覆盖、进度环闪断，
+        // 第二次结束还会把第一次刚写好的 entries 再排一次序（无害但白干）。
+        guard !isScanning else { return }
         isScanning = true
         statusMessage = "正在解析 \(identifiers.count) 张照片的 EXIF…"
         let parsed = await Helper.parseSelection(identifiers)
@@ -1265,10 +1342,12 @@ private enum GrowthStore {
         entries.sort { $0.capturedAt < $1.capturedAt }
         hasScanned = true
         isScanning = false
+        EntryCache.save(entries)
         await persistWeekSnapshot()
     }
     /// 副入口：直接扫描相册最近的 500 张照片。
     func scanWholeLibrary() async {
+        guard !isScanning else { return }
         await ensurePermission()
         guard grant == .authorized || grant == .limited else { return }
         isScanning = true
@@ -1277,12 +1356,14 @@ private enum GrowthStore {
         entries = scanned.sorted { $0.capturedAt < $1.capturedAt }
         hasScanned = true
         isScanning = false
+        EntryCache.save(entries)
         await persistWeekSnapshot()
     }
     /// 清空当前结果回到选片引导页。
     func reset() {
         entries = []
         hasScanned = false
+        EntryCache.clear()
         refreshGrant()
     }
     func persistWeekSnapshot() async {
@@ -1315,7 +1396,7 @@ struct PermissionView: View {
             .padding(Luma.sp24)
             .frame(maxWidth: 460)
             .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Luma.ink.opacity(0.06)))
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(hairline(cs)))
             Button("允许读取相册，开始", action: action)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -1380,9 +1461,24 @@ struct EmptyLibraryView: View {
 }
 
 private struct PermsManager {
+    /// 直落「系统设置 › 隐私与安全性 › 照片」。
+    ///
+    /// 原来写的是 `x-apple-settings:`——那是 iOS 的写法，macOS 上没有任何 app 声明这个 scheme，
+    /// 实测 `open` 直接返回 kLSApplicationNotFoundErr(-10814)，按钮点了**完全没反应**；
+    /// 而权限被拒时这个按钮是唯一出路，等于把用户锁死。
+    /// 两个锚点分别对应 macOS 13+ 的新面板与 macOS 12 及更早的旧面板。
     static func openSettings() {
-        if let url = URL(string: "x-apple-settings:") {
-            NSWorkspace.shared.open(url)
+        let candidates = [
+            "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Photos",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Photos",
+        ]
+        for s in candidates {
+            guard let url = URL(string: s) else { continue }
+            if NSWorkspace.shared.open(url) { return }
+        }
+        // 兜底：至少把系统设置本体打开，别让按钮彻底失效
+        if let fallback = URL(string: "x-apple.systempreferences:") {
+            NSWorkspace.shared.open(fallback)
         }
     }
 }
@@ -1462,7 +1558,7 @@ private struct ParamTile: View {
         .padding(.vertical, 10)
         .background(insetFill(cs), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .stroke(cs == .dark ? Color.white.opacity(0.10) : Luma.ink.opacity(0.05)))
+            .stroke(hairline(cs, 0.05)))
     }
 }
 
@@ -1616,7 +1712,7 @@ struct SingleShotView: View {
                     .font(.caption).monospacedDigit().foregroundStyle(tint)
             }
             GeometryReader { geo in
-                Capsule().fill(Luma.ink.opacity(0.10))
+                Capsule().fill(hairline(cs, 0.10))
                     .overlay(alignment: .leading) {
                         Capsule().fill(tint)
                             .frame(width: max(3, CGFloat(score) * geo.size.width))
@@ -1690,6 +1786,17 @@ struct LibraryView: View {
                 Button("对比") { compareSheet = true }
                     .disabled(store.entries.filter { !$0.isAI }.count < 2)
                     .help("至少需要 2 张带 EXIF 的照片才能对比")
+                // 结果现在会落盘，启动直接恢复；所以必须留一个「重新扫 / 清空」的出口，
+                // 否则用户永远摆脱不掉上次的解析结果。
+                Menu {
+                    Button("重新扫描最近 500 张") { Task { await store.scanWholeLibrary() } }
+                        .disabled(store.isScanning)
+                    Divider()
+                    Button("清空解析结果", role: .destructive) { store.reset() }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .help("重新扫描或清空结果")
             }
         }
         .overlay(alignment: .top) {
@@ -1822,7 +1929,7 @@ struct LibraryView: View {
     }
     private func gridCell(_ e: ExifEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            EntryThumbView(assetIdentifier: e.assetIdentifier, edge: density.thumbEdge)
+            EntryThumbView(assetIdentifier: e.assetIdentifier, edge: density.thumbEdge, fillWidth: true)
             Text(e.phoneModel ?? "无机型信息")
                 .font(.callout).fontWeight(.medium).lineLimit(1)
             Text(Helper.paramSummary(e))
@@ -1852,7 +1959,7 @@ struct LibraryView: View {
     }
     private func galleryCell(_ e: ExifEntry) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            EntryThumbView(assetIdentifier: e.assetIdentifier, edge: density.thumbEdge)
+            EntryThumbView(assetIdentifier: e.assetIdentifier, edge: density.thumbEdge, fillWidth: true)
             Text(e.phoneModel ?? "无机型信息")
                 .font(.title3).fontWeight(.semibold).lineLimit(1)
             HStack {
@@ -1892,11 +1999,14 @@ private enum BadgeSize {
 }
 
 /// 列表行/网格缩略图：按 assetIdentifier 异步取图。
-/// `edge` = 显示边长（按方形裁剪），取图请求按 2× retina 索取以避免糊。
+/// `edge` = 显示高度（按方形裁剪），取图请求按 2× retina 索取以避免糊。
+/// `fillWidth` 给网格/画廊用：列宽由 LazyVGrid 决定，缩略图铺满整列，
+/// 否则固定 140 的正方形放进 160 宽的列里，右边会空一条、同一行卡片宽度参差。
 /// 主题适配：底色用 Luma.muted 透明度，浅色/深色背景下都不违和。
 struct EntryThumbView: View {
     let assetIdentifier: String
     var edge: CGFloat = 56
+    var fillWidth: Bool = false
     @State private var image: NSImage? = nil
     var body: some View {
         ZStack {
@@ -1909,11 +2019,23 @@ struct EntryThumbView: View {
                     .foregroundStyle(Luma.muted)
             }
         }
-        .frame(width: edge, height: edge)
+        .modifier(ThumbFrame(edge: edge, fillWidth: fillWidth))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         // 尺寸参与 task id：密度切换后按新尺寸重新取图（缓存键也带尺寸）
-        .task(id: "\(assetIdentifier)-\(Int(edge))") {
-            image = await Helper.thumbnailForAsset(id: assetIdentifier, size: edge * 2)
+        .task(id: "\(assetIdentifier)-\(Int(edge))-\(fillWidth)") {
+            image = await Helper.thumbnailForAsset(id: assetIdentifier,
+                                                   size: fillWidth ? max(edge * 2, 440) : edge * 2)
+        }
+    }
+
+    private struct ThumbFrame: ViewModifier {
+        let edge: CGFloat, fillWidth: Bool
+        func body(content: Content) -> some View {
+            if fillWidth {
+                content.frame(maxWidth: .infinity).frame(height: edge)
+            } else {
+                content.frame(width: edge, height: edge)
+            }
         }
     }
 }
@@ -1944,7 +2066,7 @@ struct StatsView: View {
             VStack(alignment: .leading, spacing: 16) {
                 header(s)
                 rangePicker
-                if s.total == 0 { emptyHint } else { content(s) }
+                if s.total == 0 { emptyHint(s) } else { content(s) }
             }
             .padding(20)
         }
@@ -1975,19 +2097,25 @@ struct StatsView: View {
             let photoTotal = s.aestheticBuckets.reduce(0) { $0 + $1.count }
             Card(title: "画面美学", trailing: "Vision 内置模型") {
                 VStack(alignment: .leading, spacing: 12) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(String(format: "%.2f", s.meanAesthetics))
-                            .font(.title2).bold().monospacedDigit()
-                            .foregroundStyle(s.meanAesthetics >= 0.7 ? Luma.ok : Luma.accent)
-                        Text("平均美学分").font(.caption).foregroundStyle(.secondary)
-                        Spacer()
-                        Text("\(photoTotal) 张计入")
-                            .font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
-                    }
-                    VStack(alignment: .leading, spacing: 7) {
-                        ForEach(s.aestheticBuckets) { b in
-                            shareRow(label: b.label, count: b.count, maxCount: maxC,
-                                     tint: Luma.aiEstimate, total: photoTotal)
+                    if photoTotal == 0 {
+                        // 极端情况：这段时间的照片全被识别成文档/截图，均值会算成 0.00 —— 那是假的，别显示。
+                        Text("这一范围内没有可评估的实拍画面（都被识别为文档或截图）。")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    } else {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(String(format: "%.2f", s.meanAesthetics))
+                                .font(.title2).bold().monospacedDigit()
+                                .foregroundStyle(s.meanAesthetics >= 0.7 ? Luma.ok : Luma.accent)
+                            Text("平均美学分").font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Text("\(photoTotal) 张计入")
+                                .font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
+                        }
+                        VStack(alignment: .leading, spacing: 7) {
+                            ForEach(s.aestheticBuckets) { b in
+                                shareRow(label: b.label, count: b.count, maxCount: maxC,
+                                         tint: Luma.aiEstimate, total: photoTotal)
+                            }
                         }
                     }
                     if s.nonPhotoCount > 0 {
@@ -2016,11 +2144,15 @@ struct StatsView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
     }
-    private var emptyHint: some View {
+    private func emptyHint(_ s: GlobalStats) -> some View {
         Card(title: nil) {
             VStack(alignment: .leading, spacing: 6) {
-                Text("这个时间范围内没有照片").font(.headline)
-                Text("换一个更长的时间范围，或先在「照片」页添加照片。")
+                // 全部照片都是文档/截图时 total 也是 0，这时说「没有照片」是错的——照片在，只是没参与统计。
+                Text(s.skippedCount > 0 ? "这个范围里的照片都是文档 / 截图" : "这个时间范围内没有照片")
+                    .font(.headline)
+                Text(s.skippedCount > 0
+                     ? "系统视觉模型把它们判成了文档、表格或截图，没有拍摄意图，因此不计入统计。"
+                     : "换一个更长的时间范围，或先在「照片」页添加照片。")
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2043,13 +2175,17 @@ struct StatsView: View {
                                     .font(.caption).bold().monospacedDigit()
                                     .foregroundStyle(h.tint)
                             }
-                            Capsule().fill(insetFill(cs)).frame(height: 4)
-                                .overlay(alignment: .leading) {
+                            // 条形宽度跟卡片走：原来写死 160pt，卡片拉宽后右侧空一大片，
+                            // 和之前「分享条写死 190」是同一类毛病。
+                            GeometryReader { geo in
+                                ZStack(alignment: .leading) {
+                                    Capsule().fill(insetFill(cs))
                                     Capsule().fill(h.tint)
-                                        .frame(width: max(3, CGFloat(r.value) / 100 * 160))
+                                        .frame(width: max(3, CGFloat(max(0, min(r.value, 100))) / 100 * geo.size.width))
                                 }
-                                .frame(width: 160)
-                                .animation(.easeOut(duration: 0.45), value: r.value)
+                            }
+                            .frame(height: 4)
+                            .animation(.easeOut(duration: 0.45), value: r.value)
                             Text(r.hint).font(.caption2).foregroundStyle(.tertiary)
                         }
                     }
@@ -2108,7 +2244,7 @@ struct StatsView: View {
                             let v = s.heat[r][c]
                             RoundedRectangle(cornerRadius: 3, style: .continuous)
                                 .fill(v == 0
-                                      ? Luma.ink.opacity(0.05)
+                                      ? hairline(cs, 0.05)
                                       : Luma.accent.opacity(0.18 + 0.82 * (Double(v) / Double(maxC))))
                                 .frame(height: 18)
                                 .frame(maxWidth: .infinity)
@@ -2311,12 +2447,14 @@ struct StatsView: View {
     private func errorSection(_ s: GlobalStats) -> some View {
         let items: [(String, Double, Color)] = [
             ("糊片", s.blurRate, Luma.warn),
+            ("噪点", s.noiseRate, Luma.warn),
             ("过曝", s.blownRate, Luma.danger),
             ("欠曝", s.underRate, Luma.danger)
         ]
         return Card(title: "失误统计", trailing: "基于 EXIF 参数推断") {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
+                // 四项自适应：宽窗一行四个，窄窗自动折成 2×2
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), spacing: 12)], spacing: 12) {
                     ForEach(0..<items.count, id: \.self) { i in
                         let (label, rate, tint) = items[i]
                         Tile(tint: rate > 0 ? tint : nil) {
@@ -2325,17 +2463,23 @@ struct StatsView: View {
                                     .font(.title3).bold().monospacedDigit()
                                     .foregroundStyle(rate > 0 ? tint : Luma.muted)
                                 Text(label).font(.caption).foregroundStyle(.secondary)
-                                Capsule().fill(tint.opacity(0.18)).frame(height: 4)
-                                    .overlay(alignment: .leading) {
-                                        Capsule().fill(tint).frame(width: min(CGFloat(rate) * 120, 120))
+                                // 同理：原来写死 120pt，三块瓷砖一拉宽条形就短一截
+                                GeometryReader { geo in
+                                    ZStack(alignment: .leading) {
+                                        Capsule().fill(tint.opacity(0.18))
+                                        Capsule().fill(tint)
+                                            .frame(width: rate > 0
+                                                   ? max(3, min(CGFloat(rate), 1) * geo.size.width)
+                                                   : 0)
                                     }
-                                    .frame(width: 120)
-                                    .animation(.easeOut(duration: 0.45), value: rate)
+                                }
+                                .frame(height: 4)
+                                .animation(.easeOut(duration: 0.45), value: rate)
                             }
                         }
                     }
                 }
-                Text("糊片＝ISO > 1600 或快门慢于 1/30s；过曝 / 欠曝＝曝光补偿超出 ±1.3 EV。")
+                Text("糊片＝快门慢于 1/30s；噪点＝ISO 高于 1600；过曝 / 欠曝＝曝光补偿超出 ±1.3 EV。")
                     .font(.caption2).foregroundStyle(.tertiary)
             }
         }
@@ -2668,7 +2812,7 @@ struct TipsView: View {
                             .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Luma.ink.opacity(0.06)))
+                            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(hairline(cs)))
                         }
                     }
                 }
@@ -2819,7 +2963,23 @@ struct ImportView: View {
             }
             .padding(14)
             Divider()
-            if loaded {
+            if !loaded {
+                ProgressView("正在加载相册…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if assetIDs.isEmpty {
+                // 受限模式下一张都没允许，或相册本身是空的：原来这里是一片纯白，
+                // 用户只会以为 app 卡死了。
+                VStack(spacing: 10) {
+                    Image(systemName: "photo.on.rectangle.angled")
+                        .font(.system(size: 34)).foregroundStyle(.secondary)
+                    Text("没有可访问的照片").font(.headline)
+                    Text("可能是相册里还没有图片，或系统设置里只允许访问了部分照片。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("打开系统设置") { PermsManager.openSettings() }
+                        .buttonStyle(.link).font(.caption)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 124), spacing: 10)], spacing: 10) {
                         ForEach(assetIDs, id: \.self) { id in
@@ -2832,9 +2992,6 @@ struct ImportView: View {
                     }
                     .padding(14)
                 }
-            } else {
-                ProgressView("正在加载相册…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .frame(minWidth: 680, minHeight: 500)
@@ -2860,6 +3017,7 @@ struct ImageCell: View {
     let assetID: String
     let selected: Bool
     @State private var image: NSImage? = nil
+    @Environment(\.colorScheme) private var cs
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Group {
@@ -2882,7 +3040,7 @@ struct ImageCell: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(selected ? Luma.accent : Luma.ink.opacity(0.08), lineWidth: selected ? 2.5 : 0.5)
+                .stroke(selected ? Luma.accent : hairline(cs, 0.08), lineWidth: selected ? 2.5 : 0.5)
         )
         .contentShape(Rectangle())
         .task(id: assetID) { image = await Helper.thumbnailForAsset(id: assetID, size: 300) }
