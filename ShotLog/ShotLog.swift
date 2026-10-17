@@ -35,7 +35,10 @@ enum Luma {
 private func schemeCard(_ cs: ColorScheme) -> Color { cs == .dark ? Luma.cardDark : Luma.cardLight }
 private func schemeBg(_ cs: ColorScheme) -> Color { cs == .dark ? Luma.bgDark : Luma.bgLight }
 /// 卡片内部的嵌入式浅底：给 miniStat、建议行这类「卡中卡」一层轻微的凹陷感，深浅色都清晰可辨。
-private func insetFill(_ cs: ColorScheme) -> Color { Luma.ink.opacity(cs == .dark ? 0.12 : 0.04) }
+/// 深色下不能再用 ink 叠加（越叠越黑，卡片会消失），改用白色薄层做「抬起」感。
+private func insetFill(_ cs: ColorScheme) -> Color {
+    cs == .dark ? Color.white.opacity(0.07) : Luma.ink.opacity(0.04)
+}
 
 // MARK: - enum domain
 enum LightEnvironment: String, CaseIterable, Equatable {
@@ -1419,6 +1422,41 @@ struct HeroPhoto: View {
     }
 }
 
+/// 详情页拍摄参数的单个小卡片：上行「图标 + 条目名」，下行「参数值」。
+/// 走卡中卡的凹陷底色，与 Tile / miniStat 同一套视觉。
+private struct ParamTile: View {
+    let icon: String
+    let label: String
+    let value: String
+    @Environment(\.colorScheme) private var cs
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 5) {
+                Image(systemName: icon)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(Luma.accent)
+                    .frame(width: 14, alignment: .leading)
+                Text(label)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .lineLimit(2)
+                .minimumScaleFactor(0.75)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(insetFill(cs), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(cs == .dark ? Color.white.opacity(0.10) : Luma.ink.opacity(0.05)))
+    }
+}
+
 struct SingleShotView: View {
     let entry: ExifEntry
     @Environment(\.colorScheme) private var cs
@@ -1468,28 +1506,21 @@ struct SingleShotView: View {
         .padding(.horizontal, 14).padding(.vertical, 10)
         .background((isAI ? Luma.aiEstimate : Luma.ok).opacity(0.1), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
+    /// 小卡片网格：每格「图标 + 条目名」在上、「参数值」在下。
+    /// 原来左右分栏那版标签和数值被 Spacer 拉到卡片两端，读一行要横跨整幅，故改网格。
+    /// 9 条参数固定 3 列 = 3×3 方阵，窗口拉宽也保持整齐，不会出现末行只剩 1 格的断头。
     private var paramRows: some View {
-        VStack(spacing: 0) {
-            paramRow("机型", entry.phoneModel ?? "—")
-            paramRow("镜头", entry.lens ?? "无镜头数据")
-            paramRow("焦距", Helper.focalText(entry))
-            paramRow("光圈", Helper.fmtAperture(entry.aperture))
-            paramRow("快门", Helper.fmtShutter(entry.shutterSpeed))
-            paramRow("ISO", Helper.fmtISO(entry.iso))
-            paramRow("曝光补偿", Helper.fmtComp(entry.exposureComp))
-            paramRow("白平衡", entry.whiteBalance ?? "—")
-            paramRow("闪光灯", entry.flashOn.map { $0 ? "开启" : "关闭" } ?? "—")
-        }
-    }
-    private func paramRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label).font(.subheadline).foregroundStyle(.secondary)
-            Spacer()
-            Text(value).font(.subheadline).fontWeight(.medium)
-        }
-        .padding(.vertical, 7)
-        .overlay(alignment: .bottom) {
-            if label != "闪光灯" { Rectangle().fill(Luma.ink.opacity(0.06)).frame(height: 0.5) }
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                  alignment: .leading, spacing: 10) {
+            ParamTile(icon: "camera", label: "机型", value: entry.phoneModel ?? "—")
+            ParamTile(icon: "camera.aperture", label: "镜头", value: entry.lens ?? "无镜头数据")
+            ParamTile(icon: "arrow.left.and.right", label: "焦距", value: Helper.focalText(entry))
+            ParamTile(icon: "circle.dotted", label: "光圈", value: Helper.fmtAperture(entry.aperture))
+            ParamTile(icon: "timer", label: "快门", value: Helper.fmtShutter(entry.shutterSpeed))
+            ParamTile(icon: "camera.metering.center.weighted", label: "ISO", value: Helper.fmtISO(entry.iso))
+            ParamTile(icon: "plusminus.circle", label: "曝光补偿", value: Helper.fmtComp(entry.exposureComp))
+            ParamTile(icon: "sun.max", label: "白平衡", value: entry.whiteBalance ?? "—")
+            ParamTile(icon: "bolt.fill", label: "闪光灯", value: entry.flashOn.map { $0 ? "开启" : "关闭" } ?? "—")
         }
     }
     private var listEnvSection: some View {
