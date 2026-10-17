@@ -4,6 +4,7 @@ import Foundation
 import AppKit
 import CoreLocation
 import ImageIO
+import Vision
 
 // MARK: - colours
 extension Color {
@@ -223,6 +224,7 @@ struct ExifEntry: Identifiable, Codable, Equatable {
         case assetIdentifier, localURL, capturedAt, location, phoneModel, lens
         case focalLengthMm, aperture, shutterSpeed, iso, exposureComp, whiteBalance
         case flashOn, origin
+        case visionLabels, visionConfidence, aesthetics, faceCount, maxFaceArea, isUtilityShot
     }
     let assetIdentifier: String
     let localURL: URL?
@@ -238,7 +240,30 @@ struct ExifEntry: Identifiable, Codable, Equatable {
     let whiteBalance: String?
     let flashOn: Bool?
     let origin: MetaSource
+
+    // MARK: Vision 视觉事实（系统内置模型算出来的，落盘后可复现）
+    /// 分类标签，英文 identifier，按置信度降序
+    let visionLabels: [String]?
+    let visionConfidence: Double?
+    /// 美学分 0…1
+    let aesthetics: Double?
+    /// 人脸数
+    let faceCount: Int?
+    /// 最大人脸占画面面积比 0…1
+    let maxFaceArea: Double?
+    /// 系统判定为「实用图」（文档/表格/收据一类，不是自然照片）
+    let isUtilityShot: Bool?
+
     var isAI: Bool { origin == .ai }
+    /// 这一条是否真的跑过视觉模型
+    var hasVision: Bool { visionLabels?.isEmpty == false }
+    /// 截图 / 素材 / 文档类，不该混进拍摄习惯统计
+    var isNonPhoto: Bool {
+        guard hasVision else { return false }
+        if isUtilityShot == true { return true }
+        if let a = aesthetics, a < 0.05 { return true }
+        return (visionConfidence ?? 1) < 0.2
+    }
 }
 
 // MARK: - services (real Photos scanning + analyzers)
@@ -316,15 +341,19 @@ private enum Helper {
         guard let src = CGImageSourceCreateWithData(image as CFData, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(src, 0, [kCGImageSourceShouldCache as String: false] as CFDictionary) as? [String: Any]
         else { return nil }
+        // 顺手跑一次系统内置的视觉模型：从同一份 Data 取 512px 缩略图，
+        // 分类 + 人脸 + 美学一次前向约 15ms（实测），不额外解码原图。
+        let facts = VisionAnalyzer.analyze(source: src)
         let location = asset.location.map { GroundTruthLocation($0.coordinate.latitude, $0.coordinate.longitude) }
         return Helper.parseEntry(props: props, capturedAt: asset.creationDate ?? Date(),
-            location: location, assetIdentifier: asset.localIdentifier, localURL: nil)
+            location: location, assetIdentifier: asset.localIdentifier, localURL: nil, vision: facts)
     }
 
     /// 从 CGImageSource 属性字典生成分析条目。
     /// 机型在 {TIFF} 字典、拍摄参数在 {Exif} 字典——顶层键只能读到像素尺寸等少数信息。
     static func parseEntry(props: [String: Any], capturedAt: Date, location: GroundTruthLocation?,
-                           assetIdentifier: String, localURL: URL?) -> ExifEntry {
+                           assetIdentifier: String, localURL: URL?,
+                           vision: VisionFacts? = nil) -> ExifEntry {
         let tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
         let exif = props[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
         let focal = Helper.number(exif, "FocalLength")
@@ -352,7 +381,13 @@ private enum Helper {
             phoneModel: camera, lens: lens, focalLengthMm: focal,
             aperture: aperture, shutterSpeed: shutter, iso: iso,
             exposureComp: ev, whiteBalance: wb, flashOn: flashNum,
-            origin: .exif)
+            origin: .exif,
+            visionLabels: vision?.labels,
+            visionConfidence: vision?.confidence,
+            aesthetics: vision?.aesthetics,
+            faceCount: vision?.faces,
+            maxFaceArea: vision?.maxFaceArea,
+            isUtilityShot: vision?.isUtility)
     }
 
     /// 先选照片再读信息：用户在导入视图里勾选了 asset 标识符后，由这里并发解析 EXIF。
@@ -435,14 +470,46 @@ private enum Helper {
         return Double(s)
     }
 
+    /// 光线判断：Vision 真的看到了什么就报什么，看不到才退回按时钟猜。
+    /// 原来的实现只按小时判断，晚上 21 点拍的室内白天照会被当成「夜间」。
     static func analyzeLight(_ e: ExifEntry) -> LightEnvironment {
+        if let labels = e.visionLabels, !labels.isEmpty {
+            let s = Set(labels)
+            if s.contains("night") || s.contains("nighttime") || s.contains("darkness") { return .night }
+            if s.contains("sunset") || s.contains("sunrise") { return .dusk }
+            if s.contains("indoor") || s.contains("room") || s.contains("furniture")
+                || s.contains("table") || s.contains("document") { return .dim }
+            if s.contains("sky") || s.contains("blue_sky") || s.contains("outdoor")
+                || s.contains("sun") || s.contains("sunlight") { return .daylight }
+            // 有视觉结果但没命中光线关键词时，继续走时钟兜底
+        }
         let hour = Calendar.current.component(.hour, from: e.capturedAt)
         if hour >= 20 || hour < 6 { return .night }
         if hour >= 17 { return .dusk }
         if hour >= 9 { return .daylight }
         return .dim
     }
+
+    /// 题材判断：先看画面里到底是什么，再用焦段 / 闪光兜底。
+    /// 原来 `focal >= 50 → 人像` 会把 50mm 拍的猫、花、建筑全算成人像。
     static func analyzeScene(_ e: ExifEntry) -> SceneType {
+        if let labels = e.visionLabels, !labels.isEmpty {
+            let s = Set(labels)
+            if s.contains("night") || s.contains("nighttime") { return .night }
+            if s.contains("indoor") || s.contains("room") || s.contains("furniture")
+                || s.contains("table") { return .indoor }
+            if s.contains("running") || s.contains("sport") || s.contains("athletics")
+                || s.contains("basketball") || s.contains("cycling") { return .action }
+            // 人像：标签本身说是「人」最可靠
+            if s.contains("people") || s.contains("adult") || s.contains("child")
+                || s.contains("portrait") { return .portrait }
+            // 标签没提人，但画面里有张够大的脸（占画面 3% 以上）——也是人像。
+            // 不能只看「有脸」：风景照里一个路人的小脸会把整张判成人像。
+            if (e.maxFaceArea ?? 0) > 0.03 { return .portrait }
+            if s.contains("landscape") || s.contains("sky") || s.contains("mountain")
+                || s.contains("land") || s.contains("sea") || s.contains("beach")
+                || s.contains("tree") || s.contains("grass") || s.contains("rocks") { return .landscape }
+        }
         let hour = Calendar.current.component(.hour, from: e.capturedAt)
         if hour >= 20 || hour < 6 { return .night }
         if e.flashOn == true { return .indoor }
@@ -479,6 +546,182 @@ private enum Helper {
         if f < 24 { return "超广角" }
         if f >= 50 { return "长焦" }
         return "主摄"
+    }
+}
+
+// MARK: - Vision 视觉语义层（系统内置模型，零体积）
+/// 一次前向推理拿到的全部画面事实。全部来自 macOS 内置的 Vision 模型，
+/// 权重在系统里、app 不打包任何模型文件，所以二进制体积不变。
+struct VisionFacts: Equatable {
+    /// 前几个分类标签（英文 identifier，按置信度降序）
+    let labels: [String]
+    /// 主标签置信度
+    let confidence: Double
+    /// 美学分 0…1，系统模型给出的「这张好不好看」，无法用时为 nil
+    let aesthetics: Double?
+    /// 人脸数量
+    let faces: Int
+    /// 最大人脸占画面的面积比例（归一化坐标，0…1）
+    let maxFaceArea: Double
+    /// 系统判定的「实用图」（文档、表格、收据一类）
+    let isUtility: Bool
+
+    /// 置信度低到这个程度基本可以断定不是自然照片：UI 截图、图标、纯色素材。
+    /// 实测截图/精灵表的主标签置信度落在 0.10–0.36，真实照片普遍 >0.5。
+    var looksNonPhoto: Bool {
+        if isUtility { return true }
+        if let a = aesthetics, a < 0.05 { return true }
+        return confidence < 0.2
+    }
+}
+
+enum VisionAnalyzer {
+    /// 喂进来的是**已经降采样过的**图（512px 长边即可）。
+    /// 实测 6048×4032 全尺寸 54ms、512px 14.6ms，主标签一致率 28/29，
+    /// 所以没必要为了分类去解码原图。
+    static func analyze(_ cg: CGImage) -> VisionFacts? {
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+
+        let classify = VNClassifyImageRequest()
+        let faceReq = VNDetectFaceRectanglesRequest()
+        var requests: [VNRequest] = [classify, faceReq]
+
+        var aesReq: VNCalculateImageAestheticsScoresRequest?
+        if #available(macOS 15.0, *) {
+            let r = VNCalculateImageAestheticsScoresRequest()
+            aesReq = r
+            requests.append(r)
+        }
+
+        do {
+            try handler.perform(requests)
+        } catch {
+            return nil
+        }
+
+        let results = classify.results ?? []
+        guard let top = results.first, top.confidence > 0.02 else { return nil }
+
+        let aes: Double?
+        if #available(macOS 15.0, *), let r = aesReq?.results?.first {
+            aes = Double(r.overallScore)
+        } else {
+            aes = nil
+        }
+
+        // 人脸面积用来区分「人像」和「风景里有个路人」：
+        // 只看 faces > 0 的话，远景里任何一张小脸都会把照片判成人像。
+        let faceObs = faceReq.results ?? []
+        let maxFaceArea = faceObs
+            .map { Double($0.boundingBox.width * $0.boundingBox.height) }
+            .max() ?? 0
+
+        return VisionFacts(
+            labels: results.prefix(6).map { $0.identifier },
+            confidence: Double(top.confidence),
+            aesthetics: aes,
+            faces: faceObs.count,
+            maxFaceArea: maxFaceArea,
+            isUtility: {
+                if #available(macOS 15.0, *), let r = aesReq?.results?.first { return r.isUtility }
+                return false
+            }()
+        )
+    }
+
+    /// 从 CGImageSource 直接取 512px 缩略图再分析——比解码全图快一个量级。
+    static func analyze(source: CGImageSource) -> VisionFacts? {
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
+            kCGImageSourceShouldCacheImmediately: true,
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, opts as CFDictionary) else {
+            return nil
+        }
+        return analyze(thumb)
+    }
+
+    /// 英文 identifier → 中文展示名。没收录的就把下划线换成空格。
+    static func zh(_ label: String) -> String {
+        switch label {
+        case "people": return "人物"
+        case "adult": return "成年人"
+        case "child": return "孩子"
+        case "baby": return "婴儿"
+        case "portrait": return "肖像"
+        case "face": return "面部"
+        case "smile": return "笑容"
+        case "outdoor": return "户外"
+        case "indoor": return "室内"
+        case "sky": return "天空"
+        case "blue_sky": return "蓝天"
+        case "cloud": return "云"
+        case "sunset": return "日落"
+        case "sunrise": return "日出"
+        case "night": return "夜晚"
+        case "nighttime": return "夜景"
+        case "light": return "光线"
+        case "water": return "水面"
+        case "sea": return "海"
+        case "lake": return "湖"
+        case "river": return "河"
+        case "beach": return "沙滩"
+        case "mountain": return "山"
+        case "land": return "陆地"
+        case "grass": return "草地"
+        case "forest": return "森林"
+        case "tree": return "树"
+        case "flower": return "花"
+        case "plant": return "植物"
+        case "garden": return "花园"
+        case "house": return "房屋"
+        case "structure": return "建筑"
+        case "architecture": return "建筑"
+        case "building": return "楼房"
+        case "room": return "房间"
+        case "furniture": return "家具"
+        case "table": return "桌面"
+        case "food": return "食物"
+        case "meal": return "餐食"
+        case "drink": return "饮品"
+        case "animal": return "动物"
+        case "dog": return "狗"
+        case "cat": return "猫"
+        case "bird": return "鸟"
+        case "insect": return "昆虫"
+        case "arthropods": return "节肢动物"
+        case "vehicle": return "车辆"
+        case "car": return "汽车"
+        case "transport": return "交通"
+        case "sport": return "运动"
+        case "running": return "跑步"
+        case "athletics": return "竞技"
+        case "celebration": return "庆典"
+        case "ceremony": return "仪式"
+        case "wedding": return "婚礼"
+        case "clothing": return "服饰"
+        case "art": return "艺术"
+        case "painting": return "绘画"
+        case "text": return "文字"
+        case "document": return "文档"
+        case "screenshot": return "截图"
+        case "recreation": return "娱乐"
+        case "travel": return "旅行"
+        case "urban": return "城市"
+        case "city": return "城市"
+        case "road": return "道路"
+        case "rock": return "岩石"
+        case "rocks": return "岩石"
+        case "snow": return "雪"
+        case "rain": return "雨"
+        case "umbrella": return "雨伞"
+        case "reflection": return "倒影"
+        case "silhouette": return "剪影"
+        case "darkness": return "暗部"
+        default: return label.replacingOccurrences(of: "_", with: " ")
+        }
     }
 }
 
@@ -585,6 +828,14 @@ struct GlobalStats: Equatable {
     let topSceneLabel: String?
     let topFocalLabel: String?
     let health: HealthScore
+    /// 跑过视觉模型的条目数
+    let visionCount: Int
+    /// 被判定为「非照片」（截图/文档/素材）的条目数
+    let nonPhotoCount: Int
+    /// 平均美学分 0…1，没有视觉数据时为 0
+    let meanAesthetics: Double
+    /// 美学分分布
+    let aestheticBuckets: [DistBucket]
 }
 private enum StatUtility {
     /// 把一组数值按给定区间切成直方图。
@@ -746,6 +997,22 @@ private enum StatUtility {
         let topSceneLabel = scene.max(by: { $0.value < $1.value })?.key.rawValue
         let topFocalLabel = orderedLens.first?.label
 
+        // —— 视觉模型给出的画面质量 ——
+        // 只看真正跑过 Vision 的条目；截图/素材单独计数，不混进美学均值。
+        let photoish = list.filter { $0.hasVision && !$0.isNonPhoto }
+        let aesValues = photoish.compactMap { $0.aesthetics }.map { $0 }
+        let meanAesthetics = aesValues.isEmpty ? 0 : aesValues.reduce(0, +) / Double(aesValues.count)
+        let aestheticBuckets = dist(aesValues, [
+            ("<0.2", { $0 < 0.2 }),
+            ("0.2-0.4", { $0 >= 0.2 && $0 < 0.4 }),
+            ("0.4-0.55", { $0 >= 0.4 && $0 < 0.55 }),
+            ("0.55-0.7", { $0 >= 0.55 && $0 < 0.7 }),
+            ("0.7-0.85", { $0 >= 0.7 && $0 < 0.85 }),
+            ("≥0.85", { $0 >= 0.85 }),
+        ])
+        let visionCount = list.filter { $0.hasVision }.count
+        let nonPhotoCount = list.filter { $0.isNonPhoto }.count
+
         // —— 健康度评分 ——
         let exposureScore = Int(max(0, min(100, 100 - (blownRate + underRate) * 200)))
         let stabilityScore = Int(max(0, min(100, 100 - blurRate * 150)))
@@ -769,7 +1036,9 @@ private enum StatUtility {
             activeDays: activeDays, perDay: perDay,
             busiestDay: busiestDay, busiestCount: busiestCount,
             topSceneLabel: topSceneLabel, topFocalLabel: topFocalLabel,
-            health: health
+            health: health,
+            visionCount: visionCount, nonPhotoCount: nonPhotoCount,
+            meanAesthetics: meanAesthetics, aestheticBuckets: aestheticBuckets
         )
     }
 }
@@ -1016,6 +1285,7 @@ struct SingleShotView: View {
                 hero
                 sourceBanner
                 Card(title: "拍摄参数") { paramRows }
+                listVisionSection
                 listEnvSection
                 listAdviceSection
             }
@@ -1045,7 +1315,9 @@ struct SingleShotView: View {
         return HStack(spacing: 6) {
             Image(systemName: isAI ? "sparkles" : "checkmark.seal.fill")
                 .font(.caption)
-            Text(isAI ? "本页分析基于 AI 推断，非原始拍摄数据" : "全部数据来自相机 EXIF / 原始拍摄")
+            Text(isAI ? "本页分析基于 AI 推断，非原始拍摄数据"
+                 : (entry.hasVision ? "参数来自相机 EXIF · 画面内容来自系统内置视觉模型"
+                                    : "全部数据来自相机 EXIF / 原始拍摄"))
             Spacer()
         }
         .font(.subheadline)
@@ -1085,6 +1357,77 @@ struct SingleShotView: View {
         if let s = support { tags.append(Tag.support(s)) }
         if entry.isAI { tags.append(Tag.ai("环境已推测")) }
         return Card(title: "拍摄环境推断") { TagsList(tags: tags) }
+    }
+
+    /// 系统内置视觉模型读出来的画面内容。模型权重在 macOS 里，app 不打包任何文件。
+    @ViewBuilder
+    private var listVisionSection: some View {
+        if entry.hasVision {
+            Card(title: "画面识别", trailing: "Vision 内置模型") {
+                VStack(alignment: .leading, spacing: 12) {
+                    TagsList(tags: visionTags)
+                    if let a = entry.aesthetics {
+                        aestheticRow(a)
+                    }
+                    if entry.isNonPhoto {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.caption2).foregroundStyle(Luma.warn)
+                            Text("这一张更像截图或素材图，已从拍摄统计的均值里排除。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var visionTags: [Tag] {
+        var out: [Tag] = []
+        var seen = Set<String>()
+        for id in (entry.visionLabels ?? []).prefix(5) {
+            let name = VisionAnalyzer.zh(id)
+            guard !seen.contains(name) else { continue }
+            seen.insert(name)
+            out.append(Tag(name, icon: "sparkles", tint: Luma.aiEstimate, source: .ai))
+        }
+        if let f = entry.faceCount, f > 0 {
+            out.append(Tag("\(f) 张脸", icon: "face.smiling", tint: Luma.accent, source: .ai))
+        }
+        return out
+    }
+
+    private func aestheticRow(_ score: Double) -> some View {
+        let tint: Color = score >= 0.7 ? Luma.ok : (score >= 0.45 ? Luma.accent : Luma.warn)
+        let grade: String = {
+            switch score {
+            case 0.75...: return "很出彩"
+            case 0.6..<0.75: return "不错"
+            case 0.45..<0.6: return "一般"
+            case 0.3..<0.45: return "偏弱"
+            default: return "待提升"
+            }
+        }()
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text("画面美学").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Text(grade).font(.caption).fontWeight(.medium).foregroundStyle(tint)
+                Text(String(format: "%.2f", score))
+                    .font(.caption).monospacedDigit().foregroundStyle(tint)
+            }
+            GeometryReader { geo in
+                Capsule().fill(Luma.ink.opacity(0.10))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(tint)
+                            .frame(width: max(3, CGFloat(score) * geo.size.width))
+                    }
+            }
+            .frame(height: 5)
+            Text("系统美学模型给出的构图与观感评分，与曝光参数无关")
+                .font(.caption2).foregroundStyle(.tertiary)
+        }
     }
     private var listAdviceSection: some View {
         Card(title: "拍摄问题诊断") {
@@ -1420,8 +1763,40 @@ struct StatsView: View {
         timeSection(s)
         deviceSection(s)
         sceneSection(s)
+        aestheticSection(s)
         errorSection(s)
         insightSection(s)
+    }
+
+    // MARK: 画面美学（系统视觉模型）
+    /// 这一块是纯新增维度：原来的健康分只看曝光/稳定，完全不知道照片好不好看。
+    @ViewBuilder
+    private func aestheticSection(_ s: GlobalStats) -> some View {
+        if s.visionCount > 0 {
+            let maxC = max(s.aestheticBuckets.map(\.count).max() ?? 1, 1)
+            Card(title: "画面美学", trailing: "Vision 内置模型") {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(String(format: "%.2f", s.meanAesthetics))
+                            .font(.title2).bold().monospacedDigit()
+                            .foregroundStyle(s.meanAesthetics >= 0.6 ? Luma.ok : Luma.accent)
+                        Text("平均美学分").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(s.visionCount) 张已识别")
+                            .font(.caption2).monospacedDigit().foregroundStyle(.tertiary)
+                    }
+                    VStack(alignment: .leading, spacing: 7) {
+                        ForEach(s.aestheticBuckets) { b in
+                            shareRow(label: b.label, count: b.count, maxCount: maxC, tint: Luma.aiEstimate)
+                        }
+                    }
+                    if s.nonPhotoCount > 0 {
+                        Text("另有 \(s.nonPhotoCount) 张被判为截图或素材图，已排除在均值之外")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: 头部与时间范围
