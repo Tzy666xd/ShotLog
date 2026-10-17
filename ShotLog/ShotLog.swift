@@ -476,7 +476,6 @@ private enum Helper {
 
     // --- formatters ---
     static func fmtAperture(_ v: Double?) -> String { v.map { "f/\($0)" } ?? "—" }
-    static func fmtFocal(_ v: Double?) -> String { v.map { String(format: "%.0fmm", $0) } ?? "—" }
     static func fmtISO(_ v: Int?) -> String { v.map { "ISO \($0)" } ?? "—" }
     static func fmtComp(_ v: Double?) -> String { v.map { String(format: "%.1f EV", $0) } ?? "—" }
     static func fmtShutter(_ v: String?) -> String { v ?? "—" }
@@ -552,10 +551,10 @@ private enum Helper {
         let hour = Calendar.current.component(.hour, from: e.capturedAt)
         if hour >= 20 || hour < 6 { return .night }
         if e.flashOn == true { return .indoor }
-        // 焦段兜底只对相机成立：手机实际焦距都在 15mm 以内，套 50mm 阈值永远不命中
-        if let f = e.focalLengthMm, !Helper.isSmallSensor(e) {
-            if f >= 50 { return .portrait }
-            if f <= 20 { return .landscape }
+        // 焦段兜底也统一按等效焦距判断
+        if let eq = Helper.equivalentFocal(e) {
+            if eq >= 50 { return .portrait }
+            if eq <= 20 { return .landscape }
         }
         return .landscape
     }
@@ -592,25 +591,98 @@ private enum Helper {
         return markers.contains { m.contains($0) }
     }
 
-    /// 焦段归类。优先级：35mm 等效焦距 → 手机按实际焦距分档 → 相机按全画幅阈值。
-    /// 实测本机：iPhone 超广角 1.5–2.7mm、主摄 4.2–6.8mm、长焦 9mm；
-    /// 安卓 5.8mm（主摄）/ 14.6mm（长焦）；尼康 24–200mm 全画幅。
+    /// 机型 + 实际焦距 → 35mm 等效焦距。
+    ///
+    /// 为什么必须查表：手机既不写 `FocalLengthIn35mmFilm`，也不写 `FocalPlaneXResolution`
+    /// （本机相册 120 张采样里两个字段都是 0 命中），crop factor 无从推算。
+    /// 表里的值按各机型公开的镜头规格换算，覆盖本机相册出现过的设备；
+    /// 新机型没命中时会退回按镜头角色给典型值，见 `equivalentFocal`。
+    private static let eqTable: [String: [Double: Double]] = [
+        // iPhone
+        "iphone 15 pro": [2.22: 13, 2.69: 23, 6.76: 24, 6.77: 24, 9.0: 77],
+        "iphone 14 pro": [2.22: 13, 2.69: 23, 6.86: 24, 9.0: 77],
+        "iphone 14":     [5.7: 26],
+        "iphone 11":     [1.54: 13, 2.71: 23, 4.25: 26],
+        "iphone x":      [4.0: 28],
+        "iphone 6s":     [4.15: 29],
+        "iphone 16":     [2.69: 23],
+        "iphone 17":     [2.71: 23],
+        // 华为 / nova
+        "nova 14 ultra": [1.76: 13, 3.51: 16, 4.9: 16, 5.75: 24, 5.8: 24, 14.58: 90, 14.6: 90],
+        "nova 16 ultra": [1.95: 13, 3.51: 16, 6.7: 24, 6.73: 24, 14.58: 90],
+        "nova 15 ultra": [5.75: 24, 14.58: 90],
+        "nova 15 pro":   [5.72: 24],
+        "huawei mate 80":     [1.95: 13, 5.75: 24, 14.46: 90],
+        "huawei mate 70 pro+": [1.95: 13, 6.98: 24, 15.0: 90],
+        "huawei mate 70 rs | ultimate design": [6.98: 24, 15.0: 90],
+        "huawei pura 70 pro+": [15.0: 90],
+        // 其他
+        "op-041":  [7.08: 24],
+        "nth-an00": [5.52: 24],
+        "ac003":   [3.33: 16],
+        "fc6310":  [8.8: 24],
+    ]
+
+    /// 35mm 等效焦距。拿到它，焦段判断和「焦距」分布才有统一口径。
+    static func equivalentFocal(_ e: ExifEntry) -> Double? {
+        // 1. EXIF 自己写了等效值，最可靠
+        if let eq = e.focal35mm, eq > 0 { return Double(eq) }
+        guard let f = e.focalLengthMm, f > 0 else { return nil }
+        // 2. 机型 + 实际焦距查表
+        let key = (e.phoneModel ?? "").lowercased()
+        if let row = eqTable[key],
+           let hit = row.first(where: { abs($0.key - f) < 0.15 })?.value {
+            return hit
+        }
+        // 3. 手机但表里没有
+        if isSmallSensor(e) {
+            // 焦距 ≥16mm 不可能是手机实际焦距——这类机器自己写的就是等效值
+            // （iPhone 15 Pro 的 24/35/50mm 变焦模式就是这样，镜头仍是 6.765mm）
+            if f >= 16 { return f }
+            if f < 2.6 { return 13 }   // 超广角
+            if f < 4.2 { return 16 }   // 超广角 / 1x 裁切
+            if f < 8.5 { return 24 }   // 主摄
+            return 90                   // 长焦
+        }
+        // 4. 相机：实际焦距 × 机身 crop
+        return f * sensorCrop(e)
+    }
+
+    /// 相机机身的 crop factor。手机不走这里（见 equivalentFocal）。
+    static func sensorCrop(_ e: ExifEntry) -> Double {
+        let m = (e.phoneModel ?? "").lowercased()
+        if m.contains("gfx") || m.contains("x2d") || m.contains("907x") { return 0.79 }
+        if m.contains("ilce-6") || m.contains("x-t") || m.contains("x-s") || m.contains("x-h")
+            || m.contains("x100") || m.contains("eos r7") || m.contains("eos r10")
+            || m.contains("eos m") || m.contains("z 50") || m.contains("z fc")
+            || m.contains("d500") || m.contains("d7500") { return 1.5 }
+        if m.contains("dc-g") || m.contains("om-") || m.contains("e-m") { return 2.0 }
+        return 1.0   // 全画幅
+    }
+
+    /// 焦距展示：有等效值就报等效，同时保留实际值，避免「6.8mm 到底是广角还是长焦」的困惑。
+    static func focalText(_ e: ExifEntry) -> String {
+        let eq = equivalentFocal(e)
+        let raw = e.focalLengthMm
+        switch (eq, raw) {
+        case let (eq?, raw?) where abs(eq - raw) > 0.6:
+            return String(format: "等效 %.0fmm · 实际 %.1fmm", eq, raw)
+        case let (eq?, _):
+            return String(format: "等效 %.0fmm", eq)
+        case (nil, let raw?):
+            return String(format: "%.1fmm", raw)
+        default:
+            return "—"
+        }
+    }
+
+    /// 焦段归类，统一用等效焦距判断。前置镜头单列。
     static func lensLabel(_ e: ExifEntry) -> String {
         let lens = (e.lens ?? "").lowercased()
         if lens.contains("front") || lens.contains("truedepth") { return "前置" }
-        if let eq = e.focal35mm, eq > 0 {
-            if eq < 24 { return "超广角" }
-            if eq >= 50 { return "长焦" }
-            return "主摄"
-        }
-        guard let f = e.focalLengthMm else { return "其他" }
-        if isSmallSensor(e) {
-            if f < 3.4 { return "超广角" }
-            if f >= 8 { return "长焦" }
-            return "主摄"
-        }
-        if f < 24 { return "超广角" }
-        if f >= 50 { return "长焦" }
+        guard let eq = equivalentFocal(e) else { return "其他" }
+        if eq < 24 { return "超广角" }
+        if eq >= 50 { return "长焦" }
         return "主摄"
     }
 }
@@ -1023,15 +1095,17 @@ private enum StatUtility {
             ("1/15-1s", { $0 > 1.0 / 15 && $0 <= 1.0 }),
             (">1s", { $0 > 1.0 })
         ])
-        // 焦距不再按「实际毫米数」分档：手机实际焦距只有 1.5–15mm，
-        // 全部挤进 <16 一档，看不出任何信息。改成按镜头角色归类，
-        // 和「设备与焦段」那张卡片用同一套口径。
-        let lensCounts: [String: Int] = usable.reduce(into: [:]) { acc, e in
-            acc[Helper.lensLabel(e), default: 0] += 1
-        }
-        let focalBuckets = ["超广角", "主摄", "长焦", "前置", "其他"].map {
-            DistBucket(label: $0, count: lensCounts[$0] ?? 0)
-        }
+        // 焦距按「等效 35mm」分档，手机和相机因此在同一口径上可比。
+        let focalValues = usable.compactMap { Helper.equivalentFocal($0) }
+        let focalBuckets = dist(focalValues, [
+            ("<16", { $0 < 16 }),
+            ("16-24", { $0 >= 16 && $0 < 24 }),
+            ("24-35", { $0 >= 24 && $0 < 35 }),
+            ("35-50", { $0 >= 35 && $0 < 50 }),
+            ("50-85", { $0 >= 50 && $0 < 85 }),
+            ("85-135", { $0 >= 85 && $0 < 135 }),
+            (">135", { $0 >= 135 })
+        ])
         let evBuckets = dist(evValues, [
             ("≤-2", { $0 <= -2 }),
             ("-2~-1", { $0 > -2 && $0 <= -1 }),
@@ -1050,6 +1124,9 @@ private enum StatUtility {
             scene[Helper.analyzeScene(e), default: 0] += 1
             light[Helper.analyzeLight(e), default: 0] += 1
             if let s = Helper.analyzeSupport(e) { support[s, default: 0] += 1 }
+        }
+        let lensCounts: [String: Int] = usable.reduce(into: [:]) { acc, e in
+            acc[Helper.lensLabel(e), default: 0] += 1
         }
         let orderedLens = lensCounts.sorted { $0.value > $1.value }.map { LensUsage(label: $0.key, count: $0.value) }
         var camC: [String: Int] = [:]
@@ -1395,7 +1472,7 @@ struct SingleShotView: View {
         VStack(spacing: 0) {
             paramRow("机型", entry.phoneModel ?? "—")
             paramRow("镜头", entry.lens ?? "无镜头数据")
-            paramRow("焦距", Helper.fmtFocal(entry.focalLengthMm))
+            paramRow("焦距", Helper.focalText(entry))
             paramRow("光圈", Helper.fmtAperture(entry.aperture))
             paramRow("快门", Helper.fmtShutter(entry.shutterSpeed))
             paramRow("ISO", Helper.fmtISO(entry.iso))
@@ -1792,7 +1869,7 @@ private let kDistNotes = [
     "ISO 越低画质越干净；整体偏高说明常在弱光下拍摄。",
     "光圈数值越小进光越多、背景越虚。",
     "快门越慢越容易糊；手机拍摄大多落在中段。",
-    "焦距反映你偏爱的视角：广角拍景、长焦拍人。",
+    "焦距已统一为 35mm 等效：24mm 以下偏广角，50mm 以上是长焦。",
     "曝光补偿越集中在 0 附近，说明测光把控越稳。"
 ]
 private let kWeekRows = ["一", "二", "三", "四", "五", "六", "日"]
