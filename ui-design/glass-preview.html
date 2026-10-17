@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShotLog · 液态玻璃风格预览</title>
+<style>
+  :root{
+    --accent:#27A07F; --ok:#1F7F69; --warn:#E07A3E; --ink:#22323B;
+    --glass-hi:rgba(255,255,255,.52);
+    --glass-lo:rgba(255,255,255,.34);
+    --glass-edge:rgba(255,255,255,.62);
+    --glass-inner:rgba(255,255,255,.95);
+    --glass-shadow:0 12px 34px rgba(28,42,50,.14);
+    --label:#22323B; --sub:rgba(34,50,59,.62);
+    --paper:#FBFAF4;
+  }
+  body.dark{
+    --accent:#35C79E; --ok:#35C79E; --warn:#E89157; --ink:#EDEFF0;
+    --glass-hi:rgba(86,92,100,.52);
+    --glass-lo:rgba(46,49,54,.42);
+    --glass-edge:rgba(255,255,255,.16);
+    --glass-inner:rgba(255,255,255,.22);
+    --glass-shadow:0 14px 40px rgba(0,0,0,.55);
+    --label:#EDEFF0; --sub:rgba(237,239,240,.62);
+    --paper:#1B1C1E;
+  }
+  *{box-sizing:border-box;-webkit-font-smoothing:antialiased}
+  html,body{margin:0}
+  body{
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC",sans-serif;
+    color:var(--label);padding:26px 28px 56px;transition:.3s;
+    background:#0f1112;
+  }
+
+  /* 壁纸：玻璃要有东西可折射 */
+  .wall{position:fixed;inset:0;z-index:-1;background:
+    radial-gradient(60% 50% at 12% 8%, #a8d8c2 0%, transparent 62%),
+    radial-gradient(55% 45% at 88% 12%, #f0cfae 0%, transparent 64%),
+    radial-gradient(70% 60% at 70% 92%, #b9cee0 0%, transparent 62%),
+    linear-gradient(160deg,#e9eff0 0%,#f5ece1 100%);
+    transition:.35s;}
+  body.dark .wall{background:
+    radial-gradient(60% 50% at 12% 8%, #16302a 0%, transparent 60%),
+    radial-gradient(55% 45% at 88% 12%, #33261c 0%, transparent 62%),
+    radial-gradient(70% 60% at 70% 92%, #1a2733 0%, transparent 60%),
+    linear-gradient(160deg,#0d1113 0%,#141618 100%);}
+
+  .blob{position:fixed;border-radius:50%;filter:blur(90px);z-index:-1;opacity:.45;transition:.35s}
+  .b1{width:520px;height:400px;left:24%;top:26%;background:radial-gradient(circle at 40% 40%,#5FA8A0,#2E6E7A 60%,transparent 72%)}
+  .b2{width:420px;height:360px;left:52%;top:44%;background:radial-gradient(circle at 50% 50%,#E7A05F,#B4553A 55%,transparent 70%)}
+  body.dark .b1{background:radial-gradient(circle at 40% 40%,#1C4A44,#0E2A33 60%,transparent 72%);opacity:.7}
+  body.dark .b2{background:radial-gradient(circle at 50% 50%,#6A3A22,#2A1410 55%,transparent 70%);opacity:.7}
+  .blob{position:fixed;border-radius:50%;filter:blur(90px);z-index:-1;opacity:.45;transition:.35s}
+  .b1{width:520px;height:400px;left:24%;top:26%;background:radial-gradient(circle at 40% 40%,#5FA8A0,#2E6E7A 60%,transparent 72%)}
+  .b2{width:420px;height:360px;left:52%;top:44%;background:radial-gradient(circle at 50% 50%,#E7A05F,#B4553A 55%,transparent 70%)}
+  body.dark .b1{background:radial-gradient(circle at 40% 40%,#1C4A44,#0E2A33 60%,transparent 72%);opacity:.7}
+  body.dark .b2{background:radial-gradient(circle at 50% 50%,#6A3A22,#2A1410 55%,transparent 70%);opacity:.7}
+  .head{max-width:1180px;margin:0 auto 18px;display:flex;align-items:flex-end;gap:14px;flex-wrap:wrap;color:#22323B}
+  body.dark .head{color:#EDEFF0}
+  .head h1{margin:0;font-size:19px;font-weight:600;letter-spacing:-.2px}
+  .head p{margin:4px 0 0;font-size:12.5px;opacity:.78}
+  .head .spacer{flex:1}
+  .seg{display:flex;gap:4px;padding:4px;border-radius:12px;
+    background:rgba(255,255,255,.28);backdrop-filter:blur(20px) saturate(170%);
+    border:.5px solid rgba(255,255,255,.5);box-shadow:0 4px 14px rgba(0,0,0,.10)}
+  .seg button{border:0;background:transparent;color:rgba(34,50,59,.62);font:inherit;font-size:12px;
+    padding:6px 12px;border-radius:9px;cursor:pointer;transition:.18s}
+  .seg button[aria-pressed="true"]{background:rgba(255,255,255,.92);color:#22323B;box-shadow:0 1px 4px rgba(0,0,0,.12)}
+  body.dark .seg{background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.16)}
+  body.dark .seg button{color:rgba(237,239,240,.65)}
+  body.dark .seg button[aria-pressed="true"]{background:rgba(255,255,255,.22);color:#fff}
+
+  /* ---------- 窗口 ---------- */
+  .stage{max-width:1180px;margin:0 auto}
+  .win{
+    width:900px;max-width:100%;height:592px;margin:0 auto;border-radius:14px;overflow:hidden;
+    display:flex;flex-direction:column;position:relative;
+    background:rgba(255,255,255,.58);
+    backdrop-filter:blur(44px) saturate(165%);
+    border:.5px solid rgba(255,255,255,.55);
+    box-shadow:0 30px 80px rgba(20,32,38,.28), inset 0 .5px 0 rgba(255,255,255,.9);
+  }
+  body.dark .win{background:rgba(28,30,34,.62);border-color:rgba(255,255,255,.14);
+    box-shadow:0 30px 80px rgba(0,0,0,.6), inset 0 .5px 0 rgba(255,255,255,.16)}
+  /* 暖纸模式：不透明底 */
+  body.paper .win{background:var(--paper);backdrop-filter:none}
+  body.paper.dark .win{background:#1B1C1E}
+
+  .titlebar{height:44px;display:flex;align-items:center;gap:10px;padding:0 14px;flex:none;
+    border-bottom:.5px solid rgba(255,255,255,.35)}
+  body.dark .titlebar{border-bottom-color:rgba(255,255,255,.08)}
+  .lights{display:flex;gap:8px}
+  .lights i{width:12px;height:12px;border-radius:50%}
+  .lights i:nth-child(1){background:#FF5F57}.lights i:nth-child(2){background:#FEBC2E}.lights i:nth-child(3){background:#28C840}
+  .title{font-size:12.5px;font-weight:600;color:var(--sub);margin-left:6px}
+
+  .toolbar{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .gbtn{
+    height:28px;padding:0 11px;border-radius:9px;display:inline-flex;align-items:center;gap:5px;
+    font-size:12px;color:var(--label);
+    background:linear-gradient(180deg,rgba(255,255,255,.62),rgba(255,255,255,.38));
+    border:.5px solid rgba(255,255,255,.6);
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.9), 0 2px 6px rgba(20,32,38,.10);
+    backdrop-filter:blur(18px) saturate(170%);
+  }
+  body.dark .gbtn{background:linear-gradient(180deg,rgba(96,102,110,.5),rgba(52,56,62,.42));
+    border-color:rgba(255,255,255,.14);box-shadow:inset 0 .5px 0 rgba(255,255,255,.18),0 2px 6px rgba(0,0,0,.4)}
+  .gbtn.primary{background:linear-gradient(180deg,#31B48F,#27A07F);color:#fff;border-color:rgba(255,255,255,.35);
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.5), 0 3px 10px rgba(39,160,127,.35)}
+  .gbtn.icon{padding:0 9px}
+
+  /* 分段控件 */
+  .segs{display:flex;gap:3px;padding:3px;border-radius:10px;
+    background:rgba(255,255,255,.34);border:.5px solid rgba(255,255,255,.5);
+    backdrop-filter:blur(14px) saturate(160%);
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.7)}
+  body.dark .segs{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.12)}
+  .segs span{font-size:11.5px;padding:3px 10px;border-radius:7px;color:var(--sub)}
+  .segs span.on{background:rgba(255,255,255,.92);color:#22323B;box-shadow:0 1px 3px rgba(0,0,0,.12);font-weight:550}
+  body.dark .segs span.on{background:rgba(255,255,255,.20);color:#fff}
+
+  .content{flex:1;overflow:hidden;padding:16px 20px;display:flex;flex-direction:column;gap:12px}
+  .pagehead h2{margin:0;font-size:18px;font-weight:650;letter-spacing:-.25px}
+  .pagehead p{margin:3px 0 0;font-size:11.5px;color:var(--sub)}
+
+  /* ---------- 玻璃卡 ---------- */
+  .glass{
+    position:relative;border-radius:16px;padding:14px;
+    background:linear-gradient(180deg,var(--glass-hi),var(--glass-lo));
+    backdrop-filter:blur(24px) saturate(185%);
+    border:.5px solid var(--glass-edge);
+    box-shadow:inset 0 .5px 0 var(--glass-inner), var(--glass-shadow);
+  }
+  /* 顶部镜面高光 */
+  .glass::before{content:"";position:absolute;left:8px;right:8px;top:0;height:1px;border-radius:2px;
+    background:linear-gradient(90deg,transparent,rgba(255,255,255,.9),transparent);opacity:.75}
+  body.dark .glass::before{background:linear-gradient(90deg,transparent,rgba(255,255,255,.45),transparent);opacity:.6}
+
+  .row{display:flex;gap:12px}
+  .grow{flex:1}
+
+  .cardhead{display:flex;align-items:baseline;gap:8px;margin-bottom:10px}
+  .cardhead b{font-size:12.5px;font-weight:650}
+  .cardhead .tail{margin-left:auto;font-size:10.5px;color:var(--sub)}
+
+  /* 健康度 */
+  .ring{width:74px;height:74px;border-radius:50%;flex:none;position:relative;
+    background:conic-gradient(var(--accent) 0 78%, rgba(34,50,59,.10) 78% 100%)}
+  body.dark .ring{background:conic-gradient(var(--accent) 0 78%, rgba(255,255,255,.12) 78% 100%)}
+  .ring::after{content:"";position:absolute;inset:8px;border-radius:50%;
+    background:rgba(255,255,255,.55);backdrop-filter:blur(6px)}
+  body.dark .ring::after{background:rgba(28,30,34,.6)}
+  .ring span{position:absolute;inset:0;display:grid;place-items:center;font-size:19px;font-weight:700;z-index:2}
+
+  .hrow{display:flex;flex-direction:column;gap:4px;margin-bottom:8px}
+  .hrow .t{display:flex;font-size:10.5px}
+  .hrow .t em{margin-left:auto;font-style:normal;font-weight:650;color:var(--accent)}
+  .bar{height:4px;border-radius:99px;background:rgba(34,50,59,.10);overflow:hidden}
+  body.dark .bar{background:rgba(255,255,255,.12)}
+  .bar i{display:block;height:100%;border-radius:99px;background:var(--accent)}
+
+  /* 概览瓷砖 */
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .tile{border-radius:13px;padding:10px 11px;
+    background:linear-gradient(180deg,rgba(255,255,255,.52),rgba(255,255,255,.30));
+    border:.5px solid rgba(255,255,255,.55);
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.85), 0 6px 16px rgba(20,32,38,.08);
+    backdrop-filter:blur(18px) saturate(170%)}
+  body.dark .tile{background:linear-gradient(180deg,rgba(84,90,98,.42),rgba(48,52,58,.34));
+    border-color:rgba(255,255,255,.12);box-shadow:inset 0 .5px 0 rgba(255,255,255,.16),0 6px 16px rgba(0,0,0,.4)}
+  .tile .v{font-size:19px;font-weight:700;font-variant-numeric:tabular-nums}
+  .tile .k{font-size:10px;color:var(--sub);margin-top:2px;display:flex;align-items:center;gap:4px}
+
+  /* 柱状 */
+  .bars{display:flex;align-items:flex-end;gap:8px;height:96px;margin-top:6px}
+  .bars div{flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:4px}
+  .bars b{font-size:9.5px;color:var(--sub);font-weight:500}
+  .bars i{width:100%;border-radius:5px 5px 3px 3px;
+    background:linear-gradient(180deg,rgba(53,199,158,.95),rgba(39,160,127,.75));
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.5)}
+  .bars small{font-size:9px;color:var(--sub)}
+
+  /* 悬浮玻璃工具栏 */
+  .float{
+    position:absolute;right:18px;bottom:16px;display:flex;gap:6px;padding:6px;border-radius:14px;
+    background:linear-gradient(180deg,rgba(255,255,255,.6),rgba(255,255,255,.34));
+    border:.5px solid rgba(255,255,255,.6);
+    box-shadow:inset 0 .5px 0 rgba(255,255,255,.9), 0 12px 30px rgba(20,32,38,.20);
+    backdrop-filter:blur(26px) saturate(190%);
+  }
+  body.dark .float{background:linear-gradient(180deg,rgba(96,102,110,.5),rgba(46,50,56,.42));
+    border-color:rgba(255,255,255,.14);box-shadow:inset 0 .5px 0 rgba(255,255,255,.2),0 12px 30px rgba(0,0,0,.55)}
+  .float .f{width:30px;height:30px;border-radius:9px;display:grid;place-items:center;color:var(--label);
+    background:rgba(255,255,255,.30)}
+  .float .f.on{background:var(--accent);color:#fff}
+
+  /* 说明 */
+  .notes{max-width:1180px;margin:26px auto 0;color:#22323B}
+  body.dark .notes{color:#EDEFF0}
+  .notes .box{border-radius:14px;padding:16px 18px;
+    background:rgba(255,255,255,.22);backdrop-filter:blur(20px) saturate(160%);
+    border:.5px solid rgba(255,255,255,.4);display:grid;grid-template-columns:1fr 1fr;gap:14px 26px}
+  body.dark .notes .box{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.12)}
+  .notes h3{margin:0 0 10px;font-size:12.5px;font-weight:650}
+  .notes .it{display:flex;gap:9px;font-size:11.5px;line-height:1.6;opacity:.92}
+  .notes .it b{font-weight:600}
+  .notes .it .dot{width:5px;height:5px;border-radius:50%;background:var(--accent);margin-top:6px;flex:none}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+    background:rgba(255,255,255,.35);padding:1px 5px;border-radius:4px}
+  body.dark code{background:rgba(255,255,255,.12)}
+</style>
+</head>
+<body>
+
+<div class="wall"></div>
+<div class="blob b1"></div>
+<div class="blob b2"></div>
+<div class="blob b1"></div>
+<div class="blob b2"></div>
+
+<div class="head">
+  <div>
+    <h1>ShotLog · 液态玻璃（macOS 26/27 Liquid Glass）</h1>
+    <p>右边切换三种落地方式。玻璃靠壁纸折射，所以窗口背景也必须半透明，否则玻璃等于一层灰。</p>
+  </div>
+  <div class="spacer"></div>
+  <div class="seg" id="mode">
+    <button data-m="true" aria-pressed="true">真玻璃</button>
+    <button data-m="false" aria-pressed="false">暖纸底 + 玻璃卡</button>
+  </div>
+  <div class="seg" id="theme">
+    <button data-d="false" aria-pressed="true">浅色</button>
+    <button data-d="true" aria-pressed="false">深色</button>
+  </div>
+</div>
+
+<div class="stage">
+  <div class="win">
+    <div class="titlebar">
+      <div class="lights"><i></i><i></i><i></i></div>
+      <span class="title">ShotLog</span>
+      <div class="toolbar">
+        <div class="segs"><span>照片</span><span class="on">统计</span><span>成长</span><span>提示</span></div>
+        <div class="gbtn icon">＋</div>
+        <div class="gbtn icon">⋯</div>
+      </div>
+    </div>
+
+    <div class="content">
+      <div class="pagehead">
+        <h2>拍摄统计画像</h2>
+        <p>共 396 张参与统计 · EXIF 396 · 另有 104 张文档/截图未计入</p>
+      </div>
+
+      <div class="row">
+        <div class="glass grow">
+          <div class="cardhead"><b>拍摄习惯健康度</b><span class="tail">良好</span></div>
+          <div style="display:flex;gap:16px;align-items:center">
+            <div class="ring"><span>78</span></div>
+            <div style="flex:1">
+              <div class="hrow"><div class="t"><span>曝光控制</span><em>86</em></div><div class="bar"><i style="width:86%"></i></div></div>
+              <div class="hrow"><div class="t"><span>手持稳定</span><em>74</em></div><div class="bar"><i style="width:74%"></i></div></div>
+              <div class="hrow"><div class="t"><span>数据完整</span><em>92</em></div><div class="bar"><i style="width:92%"></i></div></div>
+              <div class="hrow" style="margin-bottom:0"><div class="t"><span>焦段多样</span><em>60</em></div><div class="bar"><i style="width:60%"></i></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="glass" style="width:286px">
+          <div class="cardhead"><b>参数分布</b><span class="tail">ISO</span></div>
+          <div class="bars">
+            <div><b>68</b><i style="height:27px"></i><small>≤100</small></div>
+            <div><b>114</b><i style="height:45px"></i><small>101-400</small></div>
+            <div><b>178</b><i style="height:70px"></i><small>401-800</small></div>
+            <div><b>128</b><i style="height:50px"></i><small>801-1600</small></div>
+            <div><b>82</b><i style="height:32px"></i><small>1.6k-3.2k</small></div>
+            <div><b>39</b><i style="height:15px"></i><small>&gt;3200</small></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile"><div class="v">396</div><div class="k">张 · 解析照片</div></div>
+        <div class="tile"><div class="v">412</div><div class="k">平均 ISO</div></div>
+        <div class="tile"><div class="v">5.8</div><div class="k">张/天 拍摄节奏</div></div>
+        <div class="tile"><div class="v">23%</div><div class="k">黄金时刻</div></div>
+      </div>
+
+      <div class="glass grow">
+        <div class="cardhead"><b>设备与焦段</b><span class="tail">按使用频次</span></div>
+        <div style="display:flex;gap:26px">
+          <div style="flex:1">
+            <div class="hrow"><div class="t"><span>iPhone 15 Pro</span><em>248</em></div><div class="bar"><i style="width:88%"></i></div></div>
+            <div class="hrow"><div class="t"><span>nova 15 Ultra</span><em>86</em></div><div class="bar"><i style="width:32%"></i></div></div>
+            <div class="hrow" style="margin-bottom:0"><div class="t"><span>NIKON Z f</span><em>62</em></div><div class="bar"><i style="width:24%"></i></div></div>
+          </div>
+          <div style="flex:1">
+            <div class="hrow"><div class="t"><span>主摄</span><em>233</em></div><div class="bar"><i style="width:82%"></i></div></div>
+            <div class="hrow"><div class="t"><span>长焦</span><em>96</em></div><div class="bar"><i style="width:40%"></i></div></div>
+            <div class="hrow" style="margin-bottom:0"><div class="t"><span>超广角</span><em>67</em></div><div class="bar"><i style="width:26%"></i></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="float">
+      <div class="f on">▦</div>
+      <div class="f">☰</div>
+      <div class="f">◫</div>
+    </div>
+  </div>
+</div>
+
+<div class="notes">
+  <div class="box">
+    <div class="it"><span class="dot"></span><div><b>卡片 → <code>.glassEffect(.regular, in: .rect(cornerRadius: 16))</code></b><br>不再是「白底 + 阴影」，改由系统材质负责折射；卡内不再自己画描边，交给玻璃的边界高光。</div></div>
+    <div class="it"><span class="dot"></span><div><b>相邻玻璃要同容器</b><br>多个玻璃元素贴在一起时必须包在 <code>GlassEffectContainer</code> 里，系统才会按间距做融合，否则接缝处会有硬边。</div></div>
+    <div class="it"><span class="dot"></span><div><b>按钮 → <code>.buttonStyle(.glass)</code></b><br>工具栏、密度菜单、对比按钮换成系统玻璃按钮，强调操作保留 tint 的青碧色。</div></div>
+    <div class="it"><span class="dot"></span><div><b>窗口背景必须半透明</b><br>这正是「真玻璃 / 暖纸底」需要你选的原因：底不透明，玻璃就退化成磨砂灰。</div></div>
+  </div>
+</div>
+
+<script>
+  const body = document.body;
+  if (location.search.includes('dark')) {
+    body.classList.add('dark');
+    document.querySelectorAll('#theme button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.d === 'true')));
+  }
+  if (location.search.includes('dark')) {
+    body.classList.add('dark');
+    document.querySelectorAll('#theme button').forEach(x => x.setAttribute('aria-pressed', String(x.dataset.d === 'true')));
+  }
+  document.getElementById('theme').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    body.classList.toggle('dark', b.dataset.d === 'true');
+    document.querySelectorAll('#theme button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  });
+  document.getElementById('mode').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    body.classList.toggle('paper', b.dataset.m === 'false');
+    document.querySelectorAll('#mode button').forEach(x => x.setAttribute('aria-pressed', String(x === b)));
+  });
+</script>
+</body>
+</html>

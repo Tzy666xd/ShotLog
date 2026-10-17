@@ -33,7 +33,15 @@ enum Luma {
     static let sp24: CGFloat = 24
 }
 private func schemeCard(_ cs: ColorScheme) -> Color { cs == .dark ? Luma.cardDark : Luma.cardLight }
-private func schemeBg(_ cs: ColorScheme) -> Color { cs == .dark ? Luma.bgDark : Luma.bgLight }
+/// 窗口底色。Liquid Glass 掠过往返时需要底色有变化，纯平色会让玻璃退化成一层磨砂灰，
+/// 所以这里用极淡的斜向渐变（青碧 → 暖沙）打底，玻璃才有东西可折射。
+private func schemeBg(_ cs: ColorScheme) -> LinearGradient {
+    cs == .dark
+    ? LinearGradient(colors: [Color(hex: 0x171B1E), Color(hex: 0x1E2427), Color(hex: 0x1A1D20)],
+                     startPoint: .topLeading, endPoint: .bottomTrailing)
+    : LinearGradient(colors: [Color(hex: 0xFAFCF9), Luma.accent.opacity(0.10), Color(hex: 0xF8ECDD)],
+                     startPoint: .topLeading, endPoint: .bottomTrailing)
+}
 /// 卡片内部的嵌入式浅底：给 miniStat、建议行这类「卡中卡」一层轻微的凹陷感，深浅色都清晰可辨。
 /// 深色下不能再用 ink 叠加（越叠越黑，卡片会消失），改用白色薄层做「抬起」感。
 private func insetFill(_ cs: ColorScheme) -> Color {
@@ -173,6 +181,47 @@ struct TagsList: View {
 }
 
 // MARK: - shared card container
+
+/// 玻璃底板。
+///
+/// 这里**不用** `.glassEffect`：整窗内容全是玻璃时，SwiftUI 会把窗口切成可穿透的合成层，
+/// 实测窗口会变成半透明、能看见后面别的 app（截图里浏览器文字直接透过来）。
+/// Liquid Glass 的观感主要来自「模糊 + 边缘高光 + 层次」，用系统 `.regularMaterial`
+/// 叠一层薄白与镜面描边即可拿到同样的质感，而窗口仍然是不透明的。
+private struct GlassBG: ViewModifier {
+    var radius: CGFloat
+    var tint: Color? = nil
+    @Environment(\.colorScheme) private var cs
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: radius, style: .continuous)
+        content
+            .background {
+                ZStack {
+                    shape.fill(.regularMaterial)
+                    // 玻璃自带的一点点白色乳浊感，纯 material 会偏灰
+                    shape.fill(Color.white.opacity(cs == .dark ? 0.05 : 0.42))
+                    if let tint { shape.fill(tint) }
+                }
+            }
+            // 顶部镜面高光 + 外侧细边
+            .overlay {
+                shape.stroke(
+                    LinearGradient(colors: [Color.white.opacity(cs == .dark ? 0.28 : 0.95),
+                                            Color.white.opacity(cs == .dark ? 0.10 : 0.35)],
+                                   startPoint: .top, endPoint: .bottom),
+                    lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(cs == .dark ? 0 : 0.06), radius: 12, y: 4)
+    }
+}
+extension View {
+    func lumaGlass(_ radius: CGFloat = 16, tint: Color? = nil) -> some View {
+        modifier(GlassBG(radius: radius, tint: tint))
+    }
+}
+
 /// 苹果原生的分组卡片：标题 + 内容，圆角 16、描边加浅投影。
 struct Card<Content: View>: View {
     let title: String?
@@ -192,11 +241,8 @@ struct Card<Content: View>: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
-        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
-        .overlay(RoundedRectangle(cornerRadius: 16).stroke(hairline(cs)))
-        .shadow(color: .black.opacity(cs == .dark ? 0 : 0.05), radius: 10, y: 3)
+        .lumaGlass(16)
     }
-    private var cardBackground: Color { schemeCard(cs) }
 }
 
 /// 统计页的迷你数据瓷砖：与 Card 同一配色体系（自适应底色 + 细描边），圆角 14、无阴影。
@@ -2920,8 +2966,7 @@ struct OnboardingView: View {
             floatItem("ISO", "400")
         }
         .padding(.horizontal, 12).padding(.vertical, 9)
-        .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(hairline(cs)))
+        .lumaGlass(11)
         .shadow(color: .black.opacity(0.14), radius: 12, y: 5)
     }
     private func floatItem(_ k: String, _ v: String) -> some View {
@@ -2972,9 +3017,7 @@ struct OnboardingView: View {
             Spacer(minLength: 0)
         }
         .padding(.horizontal, 13).padding(.vertical, 12)
-        .background(schemeCard(cs), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .stroke(highlight ? Luma.accent.opacity(0.45) : hairline(cs)))
+        .lumaGlass(12, tint: highlight ? Luma.accent.opacity(0.18) : nil)
         .shadow(color: .black.opacity(cs == .dark ? 0 : 0.08), radius: 9, y: 4)
     }
 
@@ -3135,6 +3178,29 @@ struct HelpCommands: Commands {
     }
 }
 
+/// 让窗口标题栏跟内容连成一片：`titlebarAppearsTransparent` 去掉标题栏自带的白底，
+/// 否则渐变背景会在标题栏下沿出现一条硬缝（上面纯白、下面带色）。
+/// 只改外观，不动窗口尺寸与拖拽行为。
+private struct WindowChrome: NSViewRepresentable {
+    var tint: Color
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            guard let w = view.window else { return }
+            w.titlebarAppearsTransparent = true
+            w.backgroundColor = NSColor(tint)
+        }
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            guard let w = nsView.window else { return }
+            w.titlebarAppearsTransparent = true
+            w.backgroundColor = NSColor(tint)
+        }
+    }
+}
+
 struct RootView: View {
     @Environment(\.colorScheme) private var cs
     @EnvironmentObject private var help: HelpCenter
@@ -3155,6 +3221,7 @@ struct RootView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(schemeBg(cs))
+        .background(WindowChrome(tint: cs == .dark ? Color(hex: 0x171B1E) : Color(hex: 0xE6EFE9)))
         .sheet(isPresented: $help.showPrivacy) { PrivacyView() }
     }
 
@@ -3184,6 +3251,7 @@ struct RootView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(schemeBg(cs))
+            .toolbarBackground(.hidden, for: .windowToolbar)
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 // 用户可能在系统设置里改完权限再切回来——每次激活都同步一次真实状态，
                 // 否则被拒后即使重新授权，界面也会永远卡在「权限未开启」
