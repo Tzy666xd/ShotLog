@@ -1424,10 +1424,12 @@ struct HeroPhoto: View {
 
 /// 详情页拍摄参数的单个小卡片：上行「图标 + 条目名」，下行「参数值」。
 /// 走卡中卡的凹陷底色，与 Tile / miniStat 同一套视觉。
+/// `detail` 放原文之类的次要信息（例如镜头的完整 LensModel），单行、更小更淡，不抢主值。
 private struct ParamTile: View {
     let icon: String
     let label: String
     let value: String
+    var detail: String? = nil
     @Environment(\.colorScheme) private var cs
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1447,6 +1449,13 @@ private struct ParamTile: View {
                 .minimumScaleFactor(0.75)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            if let detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .padding(.horizontal, 12)
@@ -1509,12 +1518,27 @@ struct SingleShotView: View {
     /// 小卡片网格：每格「图标 + 条目名」在上、「参数值」在下。
     /// 原来左右分栏那版标签和数值被 Spacer 拉到卡片两端，读一行要横跨整幅，故改网格。
     /// 9 条参数固定 3 列 = 3×3 方阵，窗口拉宽也保持整齐，不会出现末行只剩 1 格的断头。
+    /// 镜头/焦距的主值取短的那一份（镜头角色、等效毫米数），原文与「实际焦距」降到 detail 行，
+    /// 否则 iPhone 那串 "back triple camera 6.765mm" 会在小卡片里撑成三行糊成一片。
     private var paramRows: some View {
-        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
-                  alignment: .leading, spacing: 10) {
+        let eqFocal = Helper.equivalentFocal(entry)
+        let rawFocal = entry.focalLengthMm
+        let focalValue: String = {
+            if let eqFocal { return String(format: "%.0fmm 等效", eqFocal) }
+            if let rawFocal { return String(format: "%.1fmm", rawFocal) }
+            return "—"
+        }()
+        let focalDetail: String? = {
+            guard let eqFocal, let rawFocal, abs(eqFocal - rawFocal) > 0.6 else { return nil }
+            return String(format: "实际 %.1fmm", rawFocal)
+        }()
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3),
+                         alignment: .leading, spacing: 10) {
             ParamTile(icon: "camera", label: "机型", value: entry.phoneModel ?? "—")
-            ParamTile(icon: "camera.aperture", label: "镜头", value: entry.lens ?? "无镜头数据")
-            ParamTile(icon: "arrow.left.and.right", label: "焦距", value: Helper.focalText(entry))
+            ParamTile(icon: "camera.aperture", label: "镜头",
+                      value: Helper.lensLabel(entry), detail: entry.lens)
+            ParamTile(icon: "arrow.left.and.right", label: "焦距",
+                      value: focalValue, detail: focalDetail)
             ParamTile(icon: "circle.dotted", label: "光圈", value: Helper.fmtAperture(entry.aperture))
             ParamTile(icon: "timer", label: "快门", value: Helper.fmtShutter(entry.shutterSpeed))
             ParamTile(icon: "camera.metering.center.weighted", label: "ISO", value: Helper.fmtISO(entry.iso))
